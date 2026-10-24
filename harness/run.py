@@ -34,7 +34,7 @@ def setting(name, default=""):
     return os.environ.get(name, default) or default
 
 
-def wait_for_sandbox(url, seconds=60):
+def wait_for_service(url, seconds=60):
     deadline = time.time() + seconds
     while time.time() < deadline:
         try:
@@ -42,7 +42,7 @@ def wait_for_sandbox(url, seconds=60):
                 return
         except requests.RequestException:
             time.sleep(1)
-    raise RuntimeError(f"sandbox at {url} did not become ready")
+    raise RuntimeError(f"service at {url} did not become ready")
 
 
 def run_gate(env, task_ids, seed, log_path):
@@ -102,6 +102,7 @@ def load_append(name):
 
 def main():
     url = setting("SANDBOX_URL", "http://sandbox:8000")
+    verifier_url = setting("VERIFIER_URL", "http://verifier:8000")
     model, api_key, base_url = setting("MODEL", "mock/solver"), setting("API_KEY"), setting("BASE_URL") or None
     task_id, mode = setting("TASK_ID", DEMO_TASK), setting("MODE", "full")
     seed = int(setting("SEED", "0"))
@@ -135,11 +136,12 @@ def main():
         print("extra instructions: none", flush=True)
 
     try:
-        wait_for_sandbox(url)
+        wait_for_service(url)
+        wait_for_service(verifier_url)
     except RuntimeError as exc:
         print(f"error: {exc}")
         return 1
-    env = Env(url)
+    env = Env(url, verifier_url)
     task_ids = [task_id] if mode == "full" else list(TASKS)
     gate_started = time.monotonic()
     passed, rows = run_gate(env, task_ids, seed, out / "gate.jsonl")

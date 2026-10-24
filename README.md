@@ -59,7 +59,7 @@ When judges run your repo they change only these values (and the task), so your 
 ```
 docker compose up --build ...
         |
-        |-- builds both images, starts the sandbox
+        |-- builds the images, starts the sandbox and the verifier
         v
  1. ORACLE check   reference solution runs through the environment      must score >= 0.95
  2. NO-OP check    an agent that gives up immediately                   must score <= 0.05
@@ -108,11 +108,13 @@ Nothing is run separately. Build, both checks and the model run all happen from 
 ## Layout
 
 ```
-docker-compose.yml        two services: sandbox (no internet) and harness
+docker-compose.yml        three services: sandbox (no internet), verifier (harness-only) and harness
 Dockerfile.sandbox        image for the sandbox
+Dockerfile.verifier       image for the verifier
 Dockerfile.harness        image for the harness
 check_model.py            one-message connectivity check for your credentials
 sandbox/server.py         runs the agent's tools in an isolated workspace
+verifier/server.py        runs the hidden checks on a copy of the workspace
 harness/run.py            entry point: oracle, then no-op, then the model
 harness/runner.py         step loop, limits, context trimming, telemetry
 harness/env.py            reset / step / score (the verifier lives here)
@@ -121,7 +123,7 @@ harness/tools.py          tool schemas shown to the model
 harness/agents.py         OpenAI-compatible client, offline mock models, baselines
 ```
 
-The verifier's expected answers and reward code live in the harness container. The agent only ever touches the sandbox container, which has no internet access.
+The verifier's expected answers and reward code live in the harness container. The agent only ever touches the sandbox container, which has no internet access. To score, the harness copies the workspace out of the sandbox and sends it with the hidden checks to the verifier container, which sits on its own internal network that the sandbox has no route to. Hidden checks never enter the sandbox.
 
 ## Try it
 

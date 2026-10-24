@@ -1,17 +1,18 @@
 """Sandbox service: runs the agent's tools inside an isolated workspace.
 
 This container sits on an internal Docker network with no internet access.
-It holds only the agent's workspace. The verifier's expected answers and the
-reward code live in the harness container; hidden test cases are sent here
-only for the moment a score is requested, then discarded.
+It holds only the agent's workspace. Hidden checks never come here: the harness
+takes a snapshot of the workspace and sends it to the separate verifier service,
+which the sandbox has no network route to.
 """
+import base64
 import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
-import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -19,19 +20,9 @@ WORKSPACE = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 PORT = int(os.environ.get("PORT", "8000"))
 MAX_OUTPUT = 4000          # characters returned to the agent per tool call
 RUN_TIMEOUT = 20           # seconds for one run_python call
-CASE_TIMEOUT = 5           # seconds for one hidden check
-
-# Runs one hidden check in a fresh process and prints its result as JSON.
-CHILD = r'''
-import json, sys
-ns = {}
-try:
-    exec(compile(sys.argv[1], "<check>", "exec"), ns)
-    out = {"ok": True, "result": ns.get("result")}
-except BaseException as exc:
-    out = {"ok": False, "exc": type(exc).__name__}
-sys.stdout.write("\n@@RESULT@@" + json.dumps(out, default=str))
-'''
+SNAPSHOT_MAX_FILES = 500                # must match the verifier's limits
+SNAPSHOT_MAX_FILE_BYTES = 1_000_000
+SNAPSHOT_MAX_TOTAL_BYTES = 5_000_000
 
 
 def safe_path(relative: str) -> Path:
@@ -118,29 +109,33 @@ def do_tool(body):
         return {"output": f"error: {exc}", "is_error": True}
 
 
-def do_verify(body):
-    """Run each hidden check against a throwaway copy of the workspace."""
-    results = []
-    scratch = Path(tempfile.mkdtemp(prefix="verify-"))
-    try:
-        copy = scratch / "project"
-        shutil.copytree(WORKSPACE, copy, ignore=shutil.ignore_patterns("__pycache__"))
-        for code in body["cases"]:
-            try:
-                done = subprocess.run([sys.executable, "-c", CHILD, code], cwd=copy,
-                                      capture_output=True, text=True, timeout=CASE_TIMEOUT,
-                                      env={"PATH": os.environ.get("PATH", ""),
-                                           "PYTHONDONTWRITEBYTECODE": "1"})
-                marker = "@@RESULT@@"
-                if marker in done.stdout:
-                    results.append(json.loads(done.stdout.rsplit(marker, 1)[1]))
-                else:
-                    results.append({"ok": False, "exc": "NoResult"})
-            except subprocess.TimeoutExpired:
-                results.append({"ok": False, "exc": "Timeout"})
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-    return {"results": results}
+def do_snapshot(_body=None):
+    """Regular files in the workspace as {relative path: base64}, for the verifier.
+
+    Symlinks (to files or folders) and anything that is not a regular file are left out,
+    so a snapshot can never include data from outside the workspace. Over a size limit,
+    the snapshot is refused rather than cut short, and the harness scores it as a failure.
+    """
+    files, total = {}, 0
+    for folder, dirs, names in os.walk(WORKSPACE, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not os.path.islink(os.path.join(folder, d)))
+        for name in sorted(names):
+            path = os.path.join(folder, name)
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if len(files) >= SNAPSHOT_MAX_FILES:
+                return {"error": f"workspace has more than {SNAPSHOT_MAX_FILES} files"}
+            if info.st_size > SNAPSHOT_MAX_FILE_BYTES:
+                return {"error": f"a workspace file is over {SNAPSHOT_MAX_FILE_BYTES} bytes"}
+            total += info.st_size
+            if total > SNAPSHOT_MAX_TOTAL_BYTES:
+                return {"error": f"workspace is over {SNAPSHOT_MAX_TOTAL_BYTES} bytes"}
+            with open(path, "rb") as handle:
+                raw = handle.read(SNAPSHOT_MAX_FILE_BYTES + 1)
+            rel = Path(path).relative_to(WORKSPACE).as_posix()
+            files[rel] = base64.b64encode(raw).decode("ascii")
+    return {"files": files}
 
 
 def do_state(_body=None):
@@ -149,7 +144,7 @@ def do_state(_body=None):
     return {"files": files}
 
 
-ROUTES_POST = {"/reset": do_reset, "/tool": do_tool, "/verify": do_verify}
+ROUTES_POST = {"/reset": do_reset, "/tool": do_tool}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -166,6 +161,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True})
         elif self.path == "/state":
             self._send(200, do_state())
+        elif self.path == "/snapshot":
+            self._send(200, do_snapshot())
         else:
             self._send(404, {"error": "not found"})
 

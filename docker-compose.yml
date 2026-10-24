@@ -23,14 +23,34 @@ services:
       timeout: 3s
       retries: 30
 
-  harness:                       # verifier, baselines and the model loop
+  verifier:                      # runs the hidden checks; only the harness can reach it
+    build:
+      context: .
+      dockerfile: Dockerfile.verifier
+    networks: [verify]           # its own internal network: no internet, no route from the sandbox
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  harness:                       # expected answers, reward, baselines and the model loop
     build:
       context: .
       dockerfile: Dockerfile.harness
     depends_on:
       sandbox:
         condition: service_healthy
-    networks: [isolated, internet]   # can reach the sandbox and the model API
+      verifier:
+        condition: service_healthy
+    networks: [isolated, verify, internet]   # can reach the sandbox, the verifier and the model API
     environment:
       MODEL: ${MODEL:-mock/solver}
       API_KEY: ${API_KEY:-}
@@ -41,6 +61,7 @@ services:
       MODE: ${MODE:-full}
       APPEND_FILE: ${APPEND_FILE:-}
       SANDBOX_URL: http://sandbox:8000
+      VERIFIER_URL: http://verifier:8000
     volumes:
       - ./logs:/app/logs
       - ./inputs:/app/inputs:ro
@@ -48,4 +69,6 @@ services:
 networks:
   isolated:
     internal: true               # no route to the internet
+  verify:
+    internal: true               # harness <-> verifier only
   internet: {}

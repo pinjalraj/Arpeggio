@@ -29,6 +29,30 @@ def load_sandbox(workspace):
     return module
 
 
+def load_verifier():
+    """Import verifier/server.py as a fresh module."""
+    spec = importlib.util.spec_from_file_location("verifier_server", REPO / "verifier" / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def encode_files(files):
+    """{path: text} -> the snapshot format {path: base64}."""
+    import base64
+    return {name: base64.b64encode(text.encode()).decode("ascii") for name, text in files.items()}
+
+
+def wired_env(env_module, task, sandbox, verifier):
+    """An Env whose HTTP calls go straight to in-process sandbox and verifier modules."""
+    env = env_module.Env("http://sandbox.invalid", "http://verifier.invalid")
+    env.task = task
+    env._get = lambda path, timeout: {"/snapshot": sandbox.do_snapshot, "/state": sandbox.do_state}[path]()
+    env._post = lambda path, payload, timeout: {"/reset": sandbox.do_reset, "/tool": sandbox.do_tool}[path](payload)
+    env._verify = lambda payload, timeout: verifier.do_verify(payload)
+    return env
+
+
 def load_env_module():
     """Import harness/env.py. `requests` is not installed on the host, and score()
     only uses it through Env._post, which the tests replace, so a stub is enough."""
@@ -55,10 +79,19 @@ class TempWorkspace:
 
 
 # Harmless fixture: a function whose correct answer is 42, and a buggy starting version.
-FIXTURE_CHECK = "from fixture_mod import answer\nresult = answer()"
 FIXTURE_EXPECT = 42
 FIXTURE_BUGGY = "def answer():\n    return 0\n"
 FIXTURE_FIXED = "def answer():\n    return 42\n"
+
+# A structured check program (the new format) that calls fixture_mod.answer().
+FIXTURE_PROGRAM = {"module": "fixture_mod",
+                   "steps": [{"op": "call", "name": "answer", "args": [], "record": True}]}
+# A placeholder "program" for tests that stub the verifier and never run it (B tests).
+FIXTURE_CHECK = FIXTURE_PROGRAM
+
+
+def fixture_program(module="fixture_mod", name="answer", args=()):
+    return {"module": module, "steps": [{"op": "call", "name": name, "args": list(args), "record": True}]}
 
 
 def fixture_task(env_module, cases):
@@ -71,8 +104,9 @@ def fixture_task(env_module, cases):
 
 
 def env_with_results(env_module, task, results):
-    """An Env whose sandbox /verify answer is replaced by `results`."""
-    env = env_module.Env("http://unused")
+    """An Env whose verifier answer is replaced by `results` (with an empty, valid snapshot)."""
+    env = env_module.Env("http://unused", "http://unused")
     env.task = task
-    env._post = lambda path, payload, timeout: {"results": results}
+    env._get = lambda path, timeout: {"files": {}}
+    env._verify = lambda payload, timeout: {"results": results}
     return env

@@ -1,0 +1,13 @@
+# The verifier: runs hidden checks on a copy of the agent's files. Reachable only from
+# the harness (see docker-compose.yml); the agent's sandbox has no route to it.
+FROM python:3.12-slim
+RUN useradd --create-home --uid 1001 verifier
+# Owned by root, so nothing running as `verifier` can change it.
+COPY verifier/server.py /opt/verifier/server.py
+COPY verifier/worker.py /opt/verifier/worker.py
+USER verifier
+WORKDIR /tmp
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+EXPOSE 8000
+CMD ["python", "-I", "/opt/verifier/server.py"]
