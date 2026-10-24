@@ -65,7 +65,7 @@ services:
       API_KEY: ${API_KEY:-}
       BASE_URL: ${BASE_URL:-}
       MAX_TOKENS: ${MAX_TOKENS:-}
-      TASK_ID: ${TASK_ID:-slugify}
+      TASK_ID: ${TASK_ID:-compose_port_alignment}
       SEED: ${SEED:-0}
       MODE: ${MODE:-full}
       APPEND_FILE: ${APPEND_FILE:-}

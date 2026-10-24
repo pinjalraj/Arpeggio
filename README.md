@@ -1,6 +1,6 @@
 # RL Environment Template
 
-A small, working example of the run contract for the hackathon. It has six active tasks — a coding fix plus DevOps config repairs (`compose_port_alignment`, `ci_workflow_repair`, `healthy_service_startup`, `env_config_repair`) — a verifier, a reference-solution check, a no-op check, and a model loop that talks to any model through an OpenAI-compatible endpoint. Checks run either in an isolated verifier worker (for code) or as trusted file-inspection in the harness (for config files).
+A small, working example of the run contract for the hackathon. It has five active DevOps config-repair tasks — `compose_port_alignment` (the demo/default), `ci_workflow_repair`, `healthy_service_startup`, `env_config_repair` and `k8s_service_probe` — a verifier, a reference-solution check, a no-op check, and a model loop that talks to any model through an OpenAI-compatible endpoint. Checks run either in an isolated verifier worker (for code) or as trusted file-inspection in the harness (for config files).
 
 **Your environment must follow the same contract.** Judges will clone your repo's `main` branch, add a model and key, run **one command**, and watch what happens. Use this repo as a starting point for the layout, the harness and the logging.
 
@@ -128,7 +128,7 @@ The verifier's expected answers and reward code live in the harness container. T
 ## Try it
 
 ```bash
-# offline demo: the reference-solution mock solves the task
+# offline demo: the reference-solution mock solves the default task (compose_port_alignment)
 docker compose up --build --abort-on-container-exit --exit-code-from harness
 
 # an agent that does nothing (should end as a failure with reward 0)
@@ -140,8 +140,8 @@ MODE=baselines docker compose up --build --abort-on-container-exit --exit-code-f
 # the model on every task, one after another, ignores TASK_ID (each gets its own 40 steps and 10 minutes)
 MODE=all docker compose up --build --abort-on-container-exit --exit-code-from harness
 
-# a different task or seed
-TASK_ID=bulk_discount SEED=7 docker compose up --build --abort-on-container-exit --exit-code-from harness
+# a different task
+TASK_ID=k8s_service_probe docker compose up --build --abort-on-container-exit --exit-code-from harness
 ```
 
 Variables can be set in `.env` or on the command line as above.
@@ -176,7 +176,7 @@ docker builder prune -af && time docker compose build --no-cache
 
 ## Make it your own
 
-1. Replace the tasks in `harness/tasks.py`. A task builds from a seed and provides the starting files, hidden checks and a **reference solution**. `bulk_discount` shows how a seed can generate a different variant each time.
+1. Replace the tasks in `harness/tasks.py`. A task builds from a seed and provides the starting files, hidden checks and a **reference solution**. Tasks may be checked by candidate code in the isolated verifier worker, or (for config files) by trusted file-inspection in the harness; the `discount_task` function kept in that file shows how a seed can generate a different variant each time.
 2. Keep both baselines honest. The reference solution must score at least 0.95 and the no-op agent at most 0.05 on **every** task. The run stops before the model is called if either check fails, which is how a leaky verifier gets caught early. (While building this template, the no-op check flagged one of its own tasks that paid out for doing nothing.)
 3. Change the tools in `harness/tools.py` and `sandbox/server.py`, and the scoring in `harness/env.py::Env.score`.
 4. Run `MODE=baselines` and keep `logs/<run-id>/gate.json`; it goes in your submission zip as your baseline results.

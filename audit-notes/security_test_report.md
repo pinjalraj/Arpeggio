@@ -941,3 +941,76 @@ validated before the retirement, so the active set never fell below five.
 
 Unchanged: the verifier and worker, the sandbox, scoring/reward formula and thresholds, the bounded YAML
 loader, and the other active tasks.
+
+## 20. Task library — k8s_service_probe (Task 5) and final registry (exactly five DevOps tasks)
+
+### 20.1 k8s_service_probe
+`app.py` serves `/health` on 8080. The Kubernetes manifests are mis-wired: `deployment.yaml`'s
+container `readinessProbe` targets the wrong port, and `service.yaml`'s `targetPort` is wrong. The
+agent fixes both to 8080, leaving everything else unchanged. No cluster or network is needed.
+
+Acceptance checks (trusted, harness-side, bounded YAML loader; expected values never sent to candidate
+code): two targets — the readinessProbe `httpGet` equals `{path: /health, port: 8080}` (so a wrong port
+*or* path fails), and the Service `targetPort` equals 8080 — and five regressions pinning the app
+source (unchanged), the Deployment/Service selectors (both `{app: web}` and matching), the `replicas`
+count (3), the container `image` (`web:1.0`), and the Service `port` (80). The task uses five
+regressions so that weakening any single unrelated setting drops the reward to 0.94 (< 0.95) and is
+rejected; editing the app or breaking the probe path is caught by the app/probe checks.
+
+A note on the reward math: with the `0.7·target + 0.3·target·regression` formula and a 0.95 pass bar,
+a task must have at most five regression checks for "break one regression" to fall below 0.95 (six
+regressions lands exactly on 0.95). An early six-regression version of this task scored 0.95 for a
+broken setting; it was corrected by folding the probe-path check into the probe target (not by lowering
+the threshold).
+
+### 20.2 Final registry cleanup
+After k8s_service_probe passed its focused tests and baselines, `slugify` and `bulk_discount` were
+retired from the active registry (their `slugify_task` and `discount_task` functions are kept as shared
+reference code). Because `slugify` had been the demo/default task, the demo/default is now
+`compose_port_alignment`: `DEMO_TASK`, `.env.example` `TASK_ID`, and the Compose default `TASK_ID` were
+all updated, and the documented offline demo (the default `docker compose up`) was confirmed to solve
+`compose_port_alignment` (success, reward 1.0). The active registry is now exactly:
+
+1. `compose_port_alignment` (demo/default)
+2. `ci_workflow_repair`
+3. `healthy_service_startup`
+4. `env_config_repair`
+5. `k8s_service_probe`
+
+### 20.3 Results
+- Focused tests, harness image (PyYAML): `test_j_k8s_task` 5/5 OK — file-based checks, deterministic
+  reset, reference ≥ 0.95 and no-op ≤ 0.05, fixing only one manifest not enough, and editing the
+  app / weakening a setting rejected.
+- Host full suite (no PyYAML): OK, 24 skipped (the five config tasks' YAML scoring tests, the
+  privilege-drop tests, and the Windows symlink). No failures; the security regression tests
+  (verifier isolation, scoring validation, control/reset) all pass.
+- `docker compose config` → VALID.
+- Baseline gate, final five tasks: all pass — oracle 1.00, no-op 0.00 for every task; 0.28 s (all five
+  are harness-side file checks, so no verifier worker runs); exit 0; `logs/20261024-164148/gate.json`.
+  Gate task list confirmed = the five above (slugify and bulk_discount absent). Thresholds unchanged.
+- Offline demo (default `docker compose up`): `compose_port_alignment` success, reward 1.0; exit 0.
+- Determinism: for each new task, two seeds give identical files and the same `/state` hash.
+- Logs: the gate/episode logs contain reward numbers only — no per-case expected values, no check
+  source, and no credentials. (Task instructions legitimately state each task's contract; those are
+  inputs to the agent, not hidden answers.)
+
+### 20.4 Remaining limitations
+- The checks assert the manifests/config are correct; they do not run a Kubernetes cluster, start
+  services, or execute the workflow (offline harness, by design).
+- **The verifier exception-outcome-forging limitation (section 12.4) is retained and NOT fixed.** It
+  affects module-based (candidate-code) tasks; the current five active tasks are all harness-side file
+  checks and are not exposed to it, but the limitation stands for the architecture and any future
+  code-execution task.
+
+### 20.5 Files changed in this phase
+| File | Change |
+|---|---|
+| `harness/tasks.py` | new `k8s_service_probe` task + helpers (`_k8s_doc`, `_k8s_container`); retired `slugify` and `bulk_discount` from `TASKS` (functions kept); `DEMO_TASK` -> `compose_port_alignment` |
+| `tests/security/test_j_k8s_task.py` | **new**: task, reference/no-op, one-manifest-only and regression tests |
+| `docker-compose.yml` | default `TASK_ID` -> `compose_port_alignment` |
+| `.env.example` | default `TASK_ID` -> `compose_port_alignment` |
+| `README.md` | lists the final five active tasks; demo/default and example commands updated |
+| `audit-notes/security_test_report.md` | this section |
+
+Unchanged: the verifier and worker, the sandbox, scoring/reward formula and thresholds, the bounded YAML
+loader, and the other active tasks.

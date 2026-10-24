@@ -749,17 +749,144 @@ def env_task(seed):
     )
 
 
+# ------------------------------------------------ k8s_service_probe (Kubernetes manifests)
+# A DevOps task: the app serves /health on 8080, but the Deployment's readinessProbe targets the
+# wrong port and the Service's targetPort is wrong. The fix is to point both at 8080, leaving all
+# other manifest settings (labels, selectors, replicas, image, service port, probe path) unchanged.
+_K8S_APP = (
+    '"""A small HTTP service with a /health endpoint on port 8080."""\n'
+    'from http.server import BaseHTTPRequestHandler, HTTPServer\n\n'
+    'PORT = 8080\n\n\n'
+    'class Handler(BaseHTTPRequestHandler):\n'
+    '    def do_GET(self):\n'
+    '        self.send_response(200 if self.path == "/health" else 404)\n'
+    '        self.end_headers()\n'
+    '        self.wfile.write(b"ok")\n\n'
+    '    def log_message(self, *args):\n'
+    '        pass\n\n\n'
+    'if __name__ == "__main__":\n'
+    '    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()\n')
+
+_K8S_DEPLOYMENT = (
+    "apiVersion: apps/v1\n"
+    "kind: Deployment\n"
+    "metadata:\n"
+    "  name: web\n"
+    "  labels:\n"
+    "    app: web\n"
+    "spec:\n"
+    "  replicas: 3\n"
+    "  selector:\n"
+    "    matchLabels:\n"
+    "      app: web\n"
+    "  template:\n"
+    "    metadata:\n"
+    "      labels:\n"
+    "        app: web\n"
+    "    spec:\n"
+    "      containers:\n"
+    "        - name: web\n"
+    "          image: web:1.0\n"
+    "          ports:\n"
+    "            - containerPort: 8080\n"
+    "          readinessProbe:\n"
+    "            httpGet:\n"
+    "              path: /health\n"
+    "              port: {probe}\n"
+    "            initialDelaySeconds: 3\n"
+    "            periodSeconds: 5\n")
+
+_K8S_SERVICE = (
+    "apiVersion: v1\n"
+    "kind: Service\n"
+    "metadata:\n"
+    "  name: web\n"
+    "spec:\n"
+    "  selector:\n"
+    "    app: web\n"
+    "  ports:\n"
+    "    - port: 80\n"
+    "      targetPort: {target}\n")
+
+_K8S_DEPLOY_BROKEN = _K8S_DEPLOYMENT.format(probe=9090)   # wrong: app serves on 8080
+_K8S_DEPLOY_FIXED = _K8S_DEPLOYMENT.format(probe=8080)
+_K8S_SVC_BROKEN = _K8S_SERVICE.format(target=9090)        # wrong: should target 8080
+_K8S_SVC_FIXED = _K8S_SERVICE.format(target=8080)
+
+
+def _k8s_doc(decoded, path):
+    return _safe_yaml(decoded[path].decode("utf-8"))
+
+
+def _k8s_container(dep):
+    return dep["spec"]["template"]["spec"]["containers"][0]
+
+
+def k8s_task(seed):
+    def probe_correct(decoded):          # target: readiness probe hits the app's /health on 8080
+        probe = _k8s_container(_k8s_doc(decoded, "deployment.yaml"))["readinessProbe"]["httpGet"]
+        return {"ok": True, "result": {"path": probe.get("path"), "port": probe.get("port")}}
+
+    def service_target_port(decoded):    # target: Service forwards to the app's port
+        svc = _k8s_doc(decoded, "service.yaml")
+        return {"ok": True, "result": svc["spec"]["ports"][0].get("targetPort")}
+
+    def app_unchanged(decoded):          # regression: the app (its /health endpoint) is untouched
+        return {"ok": True, "result": decoded["app.py"].decode("utf-8") == _K8S_APP}
+
+    def selectors_match(decoded):        # regression: Deployment selector and Service selector agree
+        dep = _k8s_doc(decoded, "deployment.yaml")
+        svc = _k8s_doc(decoded, "service.yaml")
+        dep_sel = dep["spec"]["selector"]["matchLabels"]
+        svc_sel = svc["spec"]["selector"]
+        return {"ok": True, "result": dep_sel == {"app": "web"} and svc_sel == {"app": "web"}}
+
+    def replicas(decoded):               # regression: replica count unchanged
+        return {"ok": True, "result": _k8s_doc(decoded, "deployment.yaml")["spec"].get("replicas")}
+
+    def image(decoded):                  # regression: container image unchanged
+        return {"ok": True, "result": _k8s_container(_k8s_doc(decoded, "deployment.yaml")).get("image")}
+
+    def service_port(decoded):           # regression: the Service port (unrelated) is unchanged
+        svc = _k8s_doc(decoded, "service.yaml")
+        return {"ok": True, "result": svc["spec"]["ports"][0].get("port")}
+
+    return TaskInstance(
+        task_id="k8s_service_probe", title="Fix the Kubernetes readiness probe and Service port",
+        difficulty="medium",
+        instructions=(
+            "`app.py` serves a `/health` endpoint on port 8080. The Kubernetes manifests are wired to "
+            "the wrong port: in `deployment.yaml` the container's `readinessProbe` targets the wrong "
+            "port, and in `service.yaml` the Service's `targetPort` is wrong. Fix both so the "
+            "readiness probe and the Service `targetPort` point at the app's real port (8080). Do not "
+            "change `app.py`, and keep everything else unchanged: the labels and selectors, the "
+            "`replicas` count, the container `image`, the Service `port`, and the probe `path`. "
+            "Success: the Deployment readinessProbe port and the Service targetPort both equal the "
+            "app's port, and the application and all unrelated manifest settings are unchanged."),
+        files={"app.py": _K8S_APP, "deployment.yaml": _K8S_DEPLOY_BROKEN, "service.yaml": _K8S_SVC_BROKEN},
+        cases=[
+            Case("target", None, {"path": "/health", "port": 8080}, check=probe_correct),
+            Case("target", None, 8080, check=service_target_port),
+            Case("regression", None, True, check=app_unchanged),
+            Case("regression", None, True, check=selectors_match),
+            Case("regression", None, 3, check=replicas),
+            Case("regression", None, "web:1.0", check=image),
+            Case("regression", None, 80, check=service_port),
+        ],
+        reference={"deployment.yaml": _K8S_DEPLOY_FIXED, "service.yaml": _K8S_SVC_FIXED},
+    )
+
+
 # Active task registry. Retired starter Python-utility tasks keep their functions above as shared
 # reference code; the benchmark is moving to DevOps config-repair tasks. At least five stay active.
 TASKS = {
-    "slugify": slugify_task,
-    "bulk_discount": discount_task,
     "compose_port_alignment": compose_task,
     "ci_workflow_repair": ci_task,
     "healthy_service_startup": hss_task,
     "env_config_repair": env_task,
+    "k8s_service_probe": k8s_task,
 }
-DEMO_TASK = "slugify"
+DEMO_TASK = "compose_port_alignment"
 
 
 def build_task(task_id, seed):
