@@ -202,7 +202,7 @@ The actual run also printed environment checks first (`python --version`, `id`, 
 
 ## 9. Files created or changed in this phase
 
-Created (all untracked):
+Created (all committed in `00cebbd` on `devops-environment`):
 - `tests/security/_helpers.py`
 - `tests/security/test_a_module_shadowing.py`
 - `tests/security/test_b_result_handling.py`
@@ -212,15 +212,14 @@ Created (all untracked):
 
 Changed: none. No production code, tasks, rewards, Dockerfiles or Compose files were modified.
 
-Docker resources: the image `rlenv-sectest-sandbox:local` was created and kept. The container `rlenv-sectest` was created and removed.
+Docker resources: the image `rlenv-sectest-sandbox:local` was created and kept. The containers `rlenv-sectest` and `rlenv-sectest-unit` were created and removed.
 
-## 10. Git checkpoint recommendation (not done)
+## 10. Git checkpoint
 
-After review, commit only the files above on `devops-environment`:
-
-```bash
-git add tests/security audit-notes/security_test_report.md
-git commit -m "test: add security regression tests and report"
-```
+The security evidence is committed as **`00cebbd`** ("test: add security regression tests and report") on `devops-environment`.
+- That commit adds the 6 files above, 509 lines, and only adds lines.
+- It changes no production files: `harness/`, `sandbox/`, the Dockerfiles, `docker-compose.yml` and `requirements.txt` are identical to the previous commit `0041843`.
+- The branch has no upstream tracking set, so whether `00cebbd` has been pushed was not checked.
+- Later edits to this report, such as this section, are separate and still uncommitted until reviewed.
 
 Note: these tests currently **fail by design**, because they show the weaknesses are real. Don't wire them into a check that blocks the Docker run until the fixes land.
