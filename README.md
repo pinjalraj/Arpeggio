@@ -1,6 +1,6 @@
 # RL Environment Template
 
-A small, working example of the run contract for the hackathon. It has five active DevOps config-repair tasks — `compose_port_alignment` (the demo/default), `ci_workflow_repair`, `healthy_service_startup`, `env_config_repair` and `k8s_service_probe` — a verifier, a reference-solution check, a no-op check, and a model loop that talks to any model through an OpenAI-compatible endpoint. Checks run either in an isolated verifier worker (for code) or as trusted file-inspection in the harness (for config files).
+A small, working example of the run contract for the hackathon. It has five active DevOps config-repair tasks across two difficulty levels — **easy**: `compose_port_alignment` (the demo/default), `ci_workflow_repair`, `env_config_repair`; **medium**: `healthy_service_startup`, `k8s_service_probe` — a verifier, a reference-solution check, a no-op check, and a model loop that talks to any model through an OpenAI-compatible endpoint. Checks run either in an isolated verifier worker (for code) or as trusted file-inspection in the harness (for config files).
 
 **Your environment must follow the same contract.** Judges will clone your repo's `main` branch, add a model and key, run **one command**, and watch what happens. Use this repo as a starting point for the layout, the harness and the logging.
 

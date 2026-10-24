@@ -149,11 +149,18 @@ def run_episode(env, task_id, seed, client, append_text, limits, log):
             messages.append({"role": "user", "content": "No tool call was received. Call one of the "
                              "available tools, or call `finish` if you are done."})
 
+        time_expired = False
         for index, call in enumerate(reply.tool_calls):
             args, parse_error = call.parse()
             record["parsed_actions"].append({"tool": call.name, "args": args, "parse_error": parse_error})
+            tool_remaining = limits.max_seconds - (time.monotonic() - started)   # recheck per call
             if finished:
                 result = "not run: the episode already finished"
+            elif time_expired or tool_remaining <= 0:
+                # The episode deadline passed mid-reply: run no further tool calls this episode.
+                time_expired = True
+                result = "not run: episode time cap reached"
+                record["errors"].append({"kind": "time_cap", "detail": call.name})
             elif index >= limits.max_tool_calls:
                 result = f"not run: at most {limits.max_tool_calls} tool calls are allowed per reply"
                 record["errors"].append({"kind": "too_many_tool_calls", "detail": call.name})
@@ -169,8 +176,8 @@ def run_episode(env, task_id, seed, client, append_text, limits, log):
             elif call.name == "finish":
                 finished, result = True, "Episode finished."
             else:
-                try:
-                    result, is_error = env.step(call.name, args)
+                try:    # cap the in-flight request to the remaining episode budget
+                    result, is_error = env.step(call.name, args, timeout=tool_remaining)
                 except Exception as exc:    # a sandbox failure is a controlled tool error
                     result, is_error = f"error: sandbox call failed ({type(exc).__name__})", True
                 if is_error:
@@ -192,6 +199,9 @@ def run_episode(env, task_id, seed, client, append_text, limits, log):
         log.write(record)
         show(record)
         if finished:
+            break
+        if time_expired:        # deadline hit during this reply: stop before another model step
+            termination = "time_cap"
             break
     else:
         termination = "step_cap"

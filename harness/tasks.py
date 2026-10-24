@@ -368,7 +368,7 @@ def compose_task(seed):
         return {"ok": True, "result": int(match.group(1)) if match else None}
 
     return TaskInstance(
-        task_id="compose_port_alignment", title="Align the Compose ports", difficulty="medium",
+        task_id="compose_port_alignment", title="Align the Compose ports", difficulty="easy",
         instructions=(
             "The app in `app.py` serves its health endpoint on the port named by its `PORT` "
             "constant. `docker-compose.yml` is meant to publish that app on host port 8081, but "
@@ -490,7 +490,7 @@ def ci_task(seed):
         return {"ok": True, "result": decoded["tests/test_calc.py"].decode("utf-8") == _CI_TEST}
 
     return TaskInstance(
-        task_id="ci_workflow_repair", title="Repair the CI workflow", difficulty="medium",
+        task_id="ci_workflow_repair", title="Repair the CI workflow", difficulty="easy",
         instructions=(
             "`calc.py` is a small app and its tests live in `tests/`. The GitHub Actions workflow "
             "at `.github/workflows/ci.yml` is meant to run those tests, but its test command points "
@@ -545,7 +545,7 @@ _HSS_BROKEN = (
     "  db:\n"
     "    image: postgres:16\n"
     "    environment:\n"
-    "      POSTGRES_PASSWORD: secret\n"
+    "      POSTGRES_PASSWORD: postgres_local_dev\n"
     "    healthcheck:\n"
     '      test: ["CMD-SHELL", "echo ok"]   # does not test database readiness\n'
     "      interval: 5s\n"
@@ -566,7 +566,7 @@ _HSS_FIXED = (
     "  db:\n"
     "    image: postgres:16\n"
     "    environment:\n"
-    "      POSTGRES_PASSWORD: secret\n"
+    "      POSTGRES_PASSWORD: postgres_local_dev\n"
     "    healthcheck:\n"
     '      test: ["CMD-SHELL", "pg_isready -U postgres"]\n'
     "      interval: 5s\n"
@@ -639,7 +639,10 @@ def hss_task(seed):
             "`docker-compose.yml` so (1) the `db` service's health check uses `pg_isready`, and "
             "(2) `app` depends on `db` with `condition: service_healthy`. Keep everything else "
             "unchanged: the service names `app` and `db`, the app's `8080:8080` port, the `db` image "
-            "`postgres:16`, and the app's `DATABASE_URL`. Do not change `app.py` or the Dockerfile."),
+            "`postgres:16`, and the app's `DATABASE_URL`. Do not change `app.py` or the Dockerfile. "
+            "Success: the `db` health check uses `pg_isready`, `app.depends_on.db.condition` is "
+            "`service_healthy`, and the service names, app port, db image and `DATABASE_URL` are "
+            "unchanged."),
         files={"app.py": _HSS_APP, "Dockerfile": _HSS_DOCKERFILE, "docker-compose.yml": _HSS_BROKEN},
         cases=[
             Case("target", None, True, check=db_healthcheck_ready),
@@ -726,7 +729,7 @@ def env_task(seed):
         return {"ok": True, "result": not _has_embedded_credentials(_service_env(app, "DATABASE_URL"))}
 
     return TaskInstance(
-        task_id="env_config_repair", title="Repair the env-var name mismatch", difficulty="medium",
+        task_id="env_config_repair", title="Repair the env-var name mismatch", difficulty="easy",
         instructions=(
             "`app.py` requires the environment variable `DATABASE_URL`, but `docker-compose.yml` "
             "supplies the connection string under the wrong name `DB_CONNECTION`, so the app would "

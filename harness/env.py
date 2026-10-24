@@ -57,9 +57,11 @@ class Env:
                 "make your changes and test them, then call `finish`.")
 
     # ----------------------------------------------------------------- step
-    def step(self, name, args):
-        """Run one tool call. Returns (text, is_error)."""
-        result = self._post("/tool", {"name": name, "args": args}, self.tool_timeout)
+    def step(self, name, args, timeout=None):
+        """Run one tool call. Returns (text, is_error). An optional `timeout` (the remaining episode
+        budget) caps the request, but never above the per-tool timeout and never below 1 second."""
+        t = self.tool_timeout if timeout is None else max(1, min(self.tool_timeout, timeout))
+        result = self._post("/tool", {"name": name, "args": args}, t)
         return result["output"], result["is_error"]
 
     def state_hash(self):
