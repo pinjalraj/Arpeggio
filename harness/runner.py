@@ -169,15 +169,26 @@ def run_episode(env, task_id, seed, client, append_text, limits, log):
             elif call.name == "finish":
                 finished, result = True, "Episode finished."
             else:
-                result, is_error = env.step(call.name, args)
+                try:
+                    result, is_error = env.step(call.name, args)
+                except Exception as exc:    # a sandbox failure is a controlled tool error
+                    result, is_error = f"error: sandbox call failed ({type(exc).__name__})", True
                 if is_error:
                     record["errors"].append({"kind": "tool_error", "detail": result})
             result = result[:limits.max_output_chars]
             record["tool_result"].append(result)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
 
-        record["state"] = {"hash": env.state_hash()}
-        record["reward"] = env.score()
+        try:
+            record["state"] = {"hash": env.state_hash()}
+            record["reward"] = env.score()
+        except Exception as exc:        # a sandbox/verifier failure ends the episode cleanly
+            record["errors"].append({"kind": "scoring_failed", "detail": f"{type(exc).__name__}: {exc}"})
+            record["reward"] = {"total": None}
+            log.write(record)
+            show(record)
+            termination = "crash"
+            break
         log.write(record)
         show(record)
         if finished:

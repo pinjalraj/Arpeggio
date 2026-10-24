@@ -13,10 +13,18 @@ services:
       dockerfile: Dockerfile.sandbox
     networks: [isolated]         # internal network only: no internet access
     init: true                   # forwards SIGTERM so the sandbox stops at once instead of being killed after 10s
+    # The server runs as root but keeps only these three capabilities: SETUID/SETGID to drop
+    # run_python to the unprivileged 'coder' user, KILL to terminate coder's leftovers on reset.
     cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 256
     mem_limit: 512m
+    cpus: "1.0"
+    environment:
+      # Shared token for the harness-only control endpoints. Override with a real secret in .env.
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-rlenv-internal-control}
+      CAND_TMP: /home/coder/cand-tmp       # candidate temp/home (coder-owned), wiped on reset, outside the workspace
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 2s
@@ -35,6 +43,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     mem_limit: 512m
+    cpus: "1.0"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 2s
@@ -62,6 +71,7 @@ services:
       APPEND_FILE: ${APPEND_FILE:-}
       SANDBOX_URL: http://sandbox:8000
       VERIFIER_URL: http://verifier:8000
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-rlenv-internal-control}   # must match the sandbox
     volumes:
       - ./logs:/app/logs
       - ./inputs:/app/inputs:ro

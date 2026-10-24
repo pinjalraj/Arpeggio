@@ -21,10 +21,11 @@
 | B-extra | Extra verifier results | FIXED: an exact count is now required (was NOT REPRODUCED) |
 | B5 | Extra trailing results change the score | NOT REPRODUCED |
 | B6 | Agent-printed fake result markers inside the check process | NOT TESTED |
-| C-pre | Preconditions for interference: agent code runs as the same user as the server and can reach its port | **CONFIRMED PRECONDITION** (container) |
-| C  | Actual interference with / impersonation of the sandbox server | NOT TESTED (deliberately out of scope) |
-| D1 | Files outside the workspace survive reset | **CONFIRMED VULNERABILITY** (host simulation; `/tmp` case also confirmed in container) |
-| D2 | Processes survive reset | **CONFIRMED VULNERABILITY** (container) |
+| C-pre | Agent code ran as the same user as the server | **FIXED in container (phase E)**: run_python runs as `coder`, the server as root — section 15 |
+| C-auth | Control endpoints (`/reset`, `/tool`, `/snapshot`, `/state`) reachable unauthenticated | **FIXED in container (phase E)**: token required (verified 401 vs 200) and the candidate cannot read it (different uid) — section 15 |
+| C  | Actual interference with / impersonation of the sandbox server | NOT TESTED (candidate can't signal/ptrace the root server; no interference attack simulated) |
+| D1 | Files outside the workspace survive reset | **FIXED in container (phase E)**: candidate confined to workspace + managed temp (verified `/opt` and `/tmp` writes denied); both wiped on reset — section 15 |
+| D2 | Processes survive reset | **FIXED in container (phase E)**: reset kills all `coder` processes by uid, including a detached one (verified) — section 15 |
 
 **Current unit suite (after phase 2):** 23 tests on Linux/Python 3.12. 18 pass and 5 fail; the 5 failures are the still-open B1–B4 and D1. See section 11.
 
@@ -492,3 +493,171 @@ The only remaining unit failure is `test_d_reset_state.py::test_files_written_ou
 | `audit-notes/security_test_report.md` | this section and the summary-table updates |
 
 No other files changed. The verifier, sandbox, tasks, Docker config and reward formula are untouched.
+
+## 14. Issue C/D — Control access, reset isolation, resource limits
+
+This phase hardens the parts that the current single-identity architecture can enforce, and is
+explicit about the parts that need a separate candidate identity (proposed at the end). No task,
+reward, scoring or verifier behaviour changed.
+
+### 14.1 What was implemented
+
+| Area | Change | Where |
+|---|---|---|
+| Control-endpoint auth | `/reset`, `/tool`, `/snapshot`, `/state` now require a shared `X-Sandbox-Token`; `/health` stays open. The token is read once and `pop`-ed from `os.environ` so it is not in the server's own `/proc/<pid>/environ`. Constant-time compare | `sandbox/server.py` → `authorized`, `OPEN_PATHS`, `Handler._guard`; `harness/env.py` sends the header; `docker-compose.yml` passes `SANDBOX_TOKEN` to sandbox + harness |
+| Reset file cleanup | A managed candidate temp/home dir (`CAND_TMP`, outside the workspace so it is never snapshotted) is wiped and recreated on every reset; `run_python` runs with `TMPDIR`/`HOME` pointing there | `sandbox/server.py` → `CAND_TMP`, `do_reset`, `tool_run_python`; compose sets `CAND_TMP=/home/sandbox/cand-tmp` |
+| Reset process cleanup | Each `run_python` runs in its own process group (`start_new_session`); the group ids are tracked and SIGKILL-ed on reset and on timeout | `sandbox/server.py` → `_groups`, `_kill_tracked_groups`, `tool_run_python`, `do_reset` |
+| Resource limits | Added `cpus: "1.0"` to the sandbox and verifier (alongside the existing `mem_limit: 512m` and `pids_limit`); `run_python` keeps the 20 s wall-clock and 4 KB output cap | `docker-compose.yml` |
+| Controlled failures | A sandbox call that raises during a step becomes a controlled tool error; a scoring/`state_hash` failure ends the episode as `crash` with a logged reason instead of an unhandled traceback | `harness/runner.py` → `run_episode` |
+| Server import hygiene | The sandbox server runs under `python -I` so files in `/workspace` cannot shadow its own imports | `Dockerfile.sandbox` |
+
+The agent's own `run_python` is intentionally **not** run with `-I`: the agent must be able to import and
+test its workspace files. Isolation of the agent is by container/network, not by restricting its imports.
+
+### 14.2 Test results
+
+| Check | Kind | Result |
+|---|---|---|
+| `test_c_control_and_cleanup.py` (11 tests) | control auth, reset cleanup, controlled errors, fail-safe runner | **all PASS** |
+| Live token enforcement in the running sandbox (`/health` 200; `/state` no/wrong token → 401; right token → 200) | **access-control check** | PASS |
+| Full unit suite, Windows/Python 3.14.5 | regression | 37 tests: 35 PASS, 1 FAIL (D1 arbitrary-outside residual), 1 SKIP (symlink needs Linux) |
+| Full unit suite, Linux/Python 3.12.15, disposable container | regression | 37 tests: 36 PASS, 1 FAIL (D1 residual) |
+| `docker compose config` | config validation | PASS |
+| `MODE=baselines`, all 5 tasks (token auth active) | baseline gate | PASS: oracle 1.00, no-op 0.00 for every task; 17.59 s; exit 0; `logs/20261024-131643/gate.json` |
+| Offline `mock/solver` demo | demo | PASS: success, reward 1.0; exit 0 |
+
+The one failing unit test, `test_d_reset_state.py::test_files_written_outside_workspace_are_cleared`,
+writes to an arbitrary absolute path outside both the workspace and the managed temp dir. It is left
+failing on purpose — it marks the residual that only the identity change below closes.
+
+### 14.3 Honest limitations (what is NOT enforced yet)
+
+The current sandbox runs the server and the candidate's `run_python` under the **same user**. That
+makes three properties only partial:
+
+1. **Control-endpoint auth (C-auth).** Unauthenticated access is blocked (verified), but a same-uid
+   candidate can read the token from a sibling process's environment (e.g. PID 1 / `tini`'s
+   `/proc/1/environ`). So the token stops external/unauthenticated callers but not a determined
+   candidate. **NOT fully enforced; the candidate-side read is NOT TESTED.**
+2. **Process termination on reset (D2).** Tracked process groups are killed, but a candidate process
+   that calls `setsid()` again (or double-forks) leaves the tracked group and would survive. Guaranteed
+   termination needs kill-by-uid (root + `CAP_KILL`) or a per-episode PID namespace. **Partial.**
+3. **File confinement on reset (D1).** The managed temp/home is wiped, but candidate code can still
+   write to any path its user can write (e.g. `/tmp`, other world-writable dirs), and those survive
+   reset. Full confinement needs a candidate-writable area restricted to wiped dirs. **Partial.**
+
+Resource limits are enforced at the container level (cpus/mem/pids) and per call (wall-clock, output).
+Per-process `setrlimit` was deliberately not added inside the threaded server to avoid fork-time
+deadlocks; the container limits cover the same ground. The exception-outcome forging residual from
+section 12.4 and Issue D remain as previously described.
+
+### 14.4 Proposed next change (needs approval) — separate candidate identity
+
+The smallest architecture that actually enforces 1–3 above:
+
+- Run the sandbox **server as root** inside the container, with `cap_drop: ALL` but `cap_add:
+  [SETUID, SETGID, KILL]` and `no-new-privileges` kept.
+- Run every `run_python` child **dropped to an unprivileged user** (e.g. `coder`, uid 1001) that cannot
+  read root's `/proc/*/environ`, cannot signal or ptrace the server, and whose writable area is limited
+  to the workspace and the managed temp.
+- On reset, the root server kills **all** processes owned by `coder` (not just tracked groups) and wipes
+  `coder`'s writable dirs.
+
+This changes the container's privilege model (root + three caps instead of fully unprivileged), so I am
+not implementing it without sign-off. With it, C-auth, D1 and D2 become fully enforced.
+
+### 14.5 Files changed in this phase
+
+| File | Change |
+|---|---|
+| `sandbox/server.py` | token-guarded control endpoints; `run_python` via `Popen` with its own process group, managed `TMPDIR`/`HOME`, timeout group-kill; reset kills tracked groups and wipes the managed temp |
+| `harness/env.py` | sends `X-Sandbox-Token` on control calls; `state_hash` routed through the guarded getter; reads the token from the environment |
+| `harness/runner.py` | sandbox/verifier failures during a step become controlled errors / a clean `crash` instead of a traceback |
+| `Dockerfile.sandbox` | server runs under `python -I` |
+| `docker-compose.yml` | `cpus` limits for sandbox + verifier; `SANDBOX_TOKEN` for sandbox + harness; `CAND_TMP` for the sandbox |
+| `tests/security/test_c_control_and_cleanup.py` | **new**: control-auth, reset cleanup, controlled-error and fail-safe-runner tests |
+| `audit-notes/security_test_report.md` | this section and the summary-table updates |
+
+Unchanged: `verifier/*`, `harness/tasks.py`, the reference solutions, scoring and reward formula.
+
+## 15. Phase E — Separate candidate identity (completes Issue C/D)
+
+This replaces the single-identity residuals from section 14.3 with an enforced separation: the
+sandbox server runs as root (with only three capabilities) and runs the agent's `run_python` as a
+different unprivileged user, `coder`.
+
+### 15.1 Design (smallest portable form)
+
+- **Supervisor = root, three caps only.** `docker-compose.yml` sets `cap_drop: [ALL]` and
+  `cap_add: [SETUID, SETGID, KILL]`, keeps `no-new-privileges: true`, and uses no privileged mode and
+  no Docker socket. No `DAC_OVERRIDE`, so the root server still obeys file permissions.
+- **Candidate = `coder` (uid 1001).** `run_python` is launched with Python's `user=`/`group=`/
+  `extra_groups=[]`, which drops to `coder` in the child (needs SETUID/SETGID). The candidate gets a
+  stripped environment (no token, no root env), `HOME`/`TMPDIR` in the managed temp.
+- **Shared-group ownership.** Because root obeys permissions, `/workspace` and the managed temp are
+  `root:coder`, mode `2770` (set-group-id): both the server and `coder` can read/write them, and task
+  files are made group-writable so the agent can edit them. `coder` cannot write anywhere else.
+- **Confinement.** At startup the server removes world-write from `/tmp`, `/var/tmp` and `/dev/shm`, so
+  `coder` can only write the workspace and the managed temp — both wiped on reset.
+- **Guaranteed termination.** On reset the root server kills **every process owned by `coder`** (by
+  scanning `/proc/*/status`), so a detached process that left its group is still killed; `KILL` makes
+  this work across sessions.
+- **Off-container fallback.** When the server is not root or `coder` is absent (host, unit tests), the
+  drop and kill-by-uid are inactive and the sandbox behaves as before; the drop-dependent tests skip.
+
+### 15.2 Validation (in the real Compose sandbox, root + `coder`)
+
+Run via `docker compose exec` into the running sandbox (authenticated local client):
+
+| # | Property | Result |
+|---|---|---|
+| 1 | Server and candidate run under different UIDs | PASS: server uid 0, `run_python` uid **1001** |
+| 2 | Candidate cannot read the control token | PASS: `SANDBOX_TOKEN` absent from its env; reading `/proc/1/environ` → **PermissionError** |
+| 3 | Control endpoints reject unauthenticated requests | PASS: `/state` no token → **401**, wrong token → **401**, correct → **200** |
+| 4 | Candidate confined to its area | PASS: write `/opt` → **PermissionError**, write `/tmp` → **PermissionError**, write workspace → **WROTE** |
+| 5 | Detached process does not survive reset | PASS: a `sleep` in its own session was alive before reset and **gone after** |
+
+Other checks:
+
+| Check | Result |
+|---|---|
+| `docker compose config` | VALID (sandbox `cap_drop: ALL`, `cap_add: [SETUID, SETGID, KILL]`, not privileged) |
+| Clean build `docker compose build --no-cache` | all three images built; no extra packages; within the build budget |
+| `MODE=baselines`, all 5 tasks | PASS: oracle 1.00, no-op 0.00 for every task; 19.49 s; exit 0; `logs/20261024-134208/gate.json` |
+| Offline `mock/solver` demo | PASS: success, reward 1.0, 2 steps; exit 0 |
+| Unit suite — host (Python 3.14.5) | 39 tests OK, 4 skipped (drop-dependent + Windows symlink) |
+| Unit suite — Linux container, non-root (Python 3.12.15) | 39 tests OK, 3 skipped (drop-dependent) |
+
+The drop-dependent unit tests (`test_d_reset_state.py`) skip unless run as root with a `coder` user;
+properties 1–5 above are their in-container equivalent and are the authoritative evidence.
+
+### 15.3 Verified vs assumed, and remaining risks
+
+**Verified on this machine (Docker Desktop, Linux containers):** different UIDs; token unreadable by the
+candidate; control endpoints need the token; candidate cannot write outside its area; detached candidate
+process killed on reset; all baselines and the demo still pass; clean build works.
+
+**Assumptions / residuals:**
+- Evidence is from Docker Desktop on Windows (Linux VM). A judge's native Linux Docker behaves the same
+  for capabilities, uid drop and `/proc`, but this was not run on their machine. `SETUID`/`SETGID`/`KILL`
+  are in Docker's default set, so `cap_drop: ALL` + `cap_add` of these needs no special daemon config.
+- The server runs as **root inside the container** (locked down: three caps, no privileged, no socket,
+  internal network). That is a deliberate trade for the privilege drop; it is not host root.
+- The **exception-outcome forging** residual in the verifier (section 12.4) is unrelated to this phase and
+  still open; B-scoring (section 13) and the task library are unaffected.
+- `coder` could still consume CPU/memory up to the container limits during a single call (bounded by the
+  20 s wall-clock, `cpus`, `mem_limit`, `pids_limit`). Per-call rlimits were intentionally not added
+  inside the threaded server.
+
+### 15.4 Files changed in phase E
+
+| File | Change |
+|---|---|
+| `sandbox/server.py` | resolve `coder` ids; `run_python` drops to `coder` via `user=`/`group=`; reset kills all `coder` processes by uid; `_confine_shared_dirs` removes world-write from `/tmp`, `/var/tmp`, `/dev/shm`; task files made group-writable |
+| `Dockerfile.sandbox` | add `coder` (uid 1001); `/workspace` and the managed temp owned `root:coder` mode `2770`; server runs as root under `python -I` |
+| `docker-compose.yml` | sandbox `cap_add: [SETUID, SETGID, KILL]`; `CAND_TMP=/home/coder/cand-tmp` |
+| `tests/security/test_d_reset_state.py` | rewritten: unprivileged-uid, confinement and detached-process-kill tests (skip when the drop is inactive) |
+| `audit-notes/security_test_report.md` | this section and the summary-table updates |
+
+Unchanged: `harness/*` (the phase C/D `env.py`/`runner.py` changes stand), `verifier/*`, `harness/tasks.py`,
+the reference solutions, scoring and reward formula.

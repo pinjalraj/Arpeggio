@@ -1,10 +1,18 @@
 # The sandbox: runs the agent's tools. No internet access (see docker-compose.yml).
+# The server runs as root but with only SETUID/SETGID/KILL (set in docker-compose.yml) and no
+# DAC_OVERRIDE, so it still respects file permissions. The workspace and the candidate temp are
+# therefore owned root:coder, mode 2770 (set-group-id): both the root server and the unprivileged
+# 'coder' user that runs run_python can read/write them, while coder cannot write elsewhere.
 FROM python:3.12-slim
-RUN useradd --create-home --uid 1000 sandbox \
- && mkdir /workspace && chown sandbox:sandbox /workspace
+RUN useradd --create-home --uid 1001 coder \
+ && mkdir -p /workspace /home/coder/cand-tmp \
+ && chown root:coder /workspace /home/coder /home/coder/cand-tmp \
+ && chmod 0750 /home/coder \
+ && chmod 2770 /workspace /home/coder/cand-tmp
 COPY sandbox/server.py /opt/sandbox/server.py
-USER sandbox
 WORKDIR /workspace
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 EXPOSE 8000
-CMD ["python", "/opt/sandbox/server.py"]
+# -I so the server's own imports can't be shadowed by candidate files in /workspace.
+CMD ["python", "-I", "/opt/sandbox/server.py"]

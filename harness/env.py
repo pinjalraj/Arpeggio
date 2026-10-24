@@ -8,6 +8,7 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 from pathlib import PurePosixPath
 
 import requests
@@ -28,14 +29,16 @@ class Env:
         self.tool_timeout = tool_timeout
         self.verify_timeout = verify_timeout
         self.task = None
+        # Shared token for the sandbox's harness-only control endpoints (empty = open).
+        self._headers = {"X-Sandbox-Token": os.environ.get("SANDBOX_TOKEN", "")}
 
     def _post(self, path, payload, timeout):
-        response = requests.post(self.url + path, json=payload, timeout=timeout)
+        response = requests.post(self.url + path, json=payload, timeout=timeout, headers=self._headers)
         response.raise_for_status()
         return response.json()
 
     def _get(self, path, timeout):
-        response = requests.get(self.url + path, timeout=timeout)
+        response = requests.get(self.url + path, timeout=timeout, headers=self._headers)
         response.raise_for_status()
         return response.json()
 
@@ -60,7 +63,7 @@ class Env:
         return result["output"], result["is_error"]
 
     def state_hash(self):
-        files = requests.get(self.url + "/state", timeout=self.tool_timeout).json()["files"]
+        files = self._get("/state", self.tool_timeout)["files"]
         return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:8]
 
     # ---------------------------------------------------------------- score
