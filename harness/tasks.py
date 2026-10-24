@@ -653,15 +653,111 @@ def hss_task(seed):
     )
 
 
+# ------------------------------------------------ env_config_repair (env-var name contract)
+# A DevOps task: the app requires the environment variable DATABASE_URL, but the compose file
+# supplies the connection under the wrong name DB_CONNECTION. The fix is to provide the value under
+# DATABASE_URL in the deployment, leaving the application source unchanged. All values are synthetic
+# placeholders (no real credentials). "Fixing" the app to read DB_CONNECTION is rejected.
+_ENV_APP = (
+    '"""Reads its database connection from the required DATABASE_URL environment variable."""\n'
+    'import os\n\n'
+    'DATABASE_URL = os.environ["DATABASE_URL"]   # required; the deployment must set this\n'
+    'PORT = 8080\n\n\n'
+    'def main():\n'
+    '    print(f"would connect to {DATABASE_URL} and serve on {PORT}")\n\n\n'
+    'if __name__ == "__main__":\n    main()\n')
+
+_ENV_DOCKERFILE = (
+    "FROM python:3.12-slim\n"
+    "COPY app.py /app/app.py\n"
+    "WORKDIR /app\n"
+    "EXPOSE 8080\n"
+    'CMD ["python", "app.py"]\n')
+
+# Synthetic placeholder connection string: no username, password, token or real host.
+_ENV_CONN = "postgres://db:5432/appdb"
+
+_ENV_COMPOSE = (
+    "services:\n"
+    "  app:\n"
+    "    build: .\n"
+    "    environment:\n"
+    "      {key}: {conn}\n"
+    "      LOG_LEVEL: info\n"
+    "    ports:\n"
+    '      - "8080:8080"\n')
+
+_ENV_BROKEN = _ENV_COMPOSE.format(key="DB_CONNECTION", conn=_ENV_CONN)   # wrong variable name
+_ENV_FIXED = _ENV_COMPOSE.format(key="DATABASE_URL", conn=_ENV_CONN)
+
+
+def _env_compose(decoded):
+    return _safe_yaml(decoded["docker-compose.yml"].decode("utf-8"))
+
+
+def _has_embedded_credentials(value):
+    """True if a connection string embeds a user:password@ credential (i.e. not a placeholder)."""
+    import re
+    return isinstance(value, str) and re.search(r"://[^/@\s]*:[^/@\s]*@", value) is not None
+
+
+def env_task(seed):
+    def supplies_database_url(decoded):   # target: the deployment sets the required variable name
+        app = _service(_env_compose(decoded), "app")
+        return {"ok": True, "result": _service_env(app, "DATABASE_URL") is not None}
+
+    def database_url_value(decoded):      # target: and it carries the intended connection string
+        app = _service(_env_compose(decoded), "app")
+        return {"ok": True, "result": _service_env(app, "DATABASE_URL")}
+
+    def app_source_unchanged(decoded):    # regression: the application source is untouched
+        return {"ok": True, "result": decoded["app.py"].decode("utf-8") == _ENV_APP}
+
+    def log_level_unchanged(decoded):     # regression: unrelated setting is preserved
+        app = _service(_env_compose(decoded), "app")
+        return {"ok": True, "result": _service_env(app, "LOG_LEVEL")}
+
+    def app_port_unchanged(decoded):      # regression: the app port mapping is preserved
+        ports = _service(_env_compose(decoded), "app").get("ports")
+        return {"ok": True, "result": sorted([h, c] for h, c in _port_map(ports).items())}
+
+    def no_embedded_credentials(decoded):  # regression: configuration stays a placeholder
+        app = _service(_env_compose(decoded), "app")
+        return {"ok": True, "result": not _has_embedded_credentials(_service_env(app, "DATABASE_URL"))}
+
+    return TaskInstance(
+        task_id="env_config_repair", title="Repair the env-var name mismatch", difficulty="medium",
+        instructions=(
+            "`app.py` requires the environment variable `DATABASE_URL`, but `docker-compose.yml` "
+            "supplies the connection string under the wrong name `DB_CONNECTION`, so the app would "
+            "fail to start. Fix `docker-compose.yml` so the app's `environment` provides the same "
+            "connection string under the name `DATABASE_URL`. Do not change `app.py`, and do not "
+            "change the connection value, the `LOG_LEVEL` setting or the `8080:8080` port. The "
+            "value is a placeholder — do not add real credentials. Success: the app service's "
+            "`environment` sets `DATABASE_URL` to the placeholder connection string and the "
+            "application source is unchanged."),
+        files={"app.py": _ENV_APP, "Dockerfile": _ENV_DOCKERFILE, "docker-compose.yml": _ENV_BROKEN},
+        cases=[
+            Case("target", None, True, check=supplies_database_url),
+            Case("target", None, _ENV_CONN, check=database_url_value),
+            Case("regression", None, True, check=app_source_unchanged),
+            Case("regression", None, "info", check=log_level_unchanged),
+            Case("regression", None, [[8080, 8080]], check=app_port_unchanged),
+            Case("regression", None, True, check=no_embedded_credentials),
+        ],
+        reference={"docker-compose.yml": _ENV_FIXED},
+    )
+
+
 # Active task registry. Retired starter Python-utility tasks keep their functions above as shared
 # reference code; the benchmark is moving to DevOps config-repair tasks. At least five stay active.
 TASKS = {
     "slugify": slugify_task,
-    "lru_cache": lru_task,
     "bulk_discount": discount_task,
     "compose_port_alignment": compose_task,
     "ci_workflow_repair": ci_task,
     "healthy_service_startup": hss_task,
+    "env_config_repair": env_task,
 }
 DEMO_TASK = "slugify"
 

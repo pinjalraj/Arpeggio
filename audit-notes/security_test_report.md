@@ -884,3 +884,60 @@ never below five (the new task was added and validated before the retirement).
 
 Unchanged: the verifier and worker, the sandbox, scoring/reward formula and thresholds, the bounded YAML
 loader, and the other active tasks.
+
+## 19. Task library — env_config_repair (Task 4) and third legacy retirement
+
+### 19.1 env_config_repair
+The app requires the env var `DATABASE_URL`, but `docker-compose.yml` supplies the connection under
+the wrong name `DB_CONNECTION`. The agent must provide the same value under `DATABASE_URL` in the
+deployment, leaving the app source unchanged. All values are synthetic placeholders — the connection
+string `postgres://db:5432/appdb` has no username, password, token or real host.
+
+Acceptance checks (trusted, harness-side, bounded YAML loader; expected values never sent to candidate
+code): two targets — the app service's `environment` sets `DATABASE_URL`, and its value equals the
+intended placeholder — and four regressions — the app source is byte-for-byte unchanged (this is what
+rejects "fixing" the app to read `DB_CONNECTION`), `LOG_LEVEL` is unchanged, the `8080:8080` port is
+unchanged, and the connection value carries no embedded `user:password@` credential (placeholder-only,
+per the no-secrets requirement). Changing the app loses a regression (reward 0.925 < 0.95), so that
+wrong repair is rejected.
+
+### 19.2 Third retirement
+After env_config_repair passed its focused tests and reference/no-op baselines, `lru_cache` was retired
+from the active registry (its `lru_task` function is kept as shared reference code). It was referenced
+only within `harness/tasks.py`; it is not the demo/default task and has no shared-infrastructure
+dependency, and the security structure/leak test iterates the active registry rather than naming tasks.
+Active registry (exactly six): `slugify`, `bulk_discount`, `compose_port_alignment`,
+`ci_workflow_repair`, `healthy_service_startup`, `env_config_repair`. The new task was added and
+validated before the retirement, so the active set never fell below five.
+
+### 19.3 Results
+- Focused tests, harness image (PyYAML): `test_i_env_task` 5/5 OK — file-based checks and no credential
+  in the starting files; deterministic reset; reference ≥ 0.95 and no-op ≤ 0.05; fixing the app instead
+  of the deployment rejected; introducing an embedded credential rejected.
+- Host full suite (no PyYAML): OK, 21 skipped (YAML scoring tests across the four config tasks, the
+  privilege-drop tests, the Windows symlink). No failures; the security regression tests still pass.
+- `docker compose config` → VALID.
+- Baseline gate, active registry (6 tasks) after retirement: all pass — oracle 1.00, no-op 0.00 for
+  every task including `env_config_repair`; 5.73 s; exit 0; `logs/20261024-161015/gate.json`. Gate task
+  list confirmed (lru_cache absent). Thresholds unchanged.
+- Offline demo (`TASK_ID=env_config_repair`): success, reward 1.0; exit 0.
+- Determinism: seed 0 and seed 31 give identical files and the same `/state` hash.
+- Application source: the reference repair touches only `docker-compose.yml`; `app.py` is unchanged
+  (pinned by a regression check), and no credentials are introduced (placeholder check).
+
+### 19.4 Remaining limitations
+- The checks assert the deployment supplies the variable under the correct name and value; they do not
+  start the app or prove it connects (offline harness, by design).
+- The exception-outcome forging residual (section 12.4) is unrelated and still open; this task uses only
+  harness-side file checks and is not exposed to it.
+
+### 19.5 Files changed in this phase
+| File | Change |
+|---|---|
+| `harness/tasks.py` | new `env_config_repair` task + `_has_embedded_credentials` helper; retired `lru_cache` from `TASKS` (function kept) |
+| `tests/security/test_i_env_task.py` | **new**: task, reference/no-op, wrong-repair and no-credential tests |
+| `README.md` | lists the fourth DevOps task |
+| `audit-notes/security_test_report.md` | this section |
+
+Unchanged: the verifier and worker, the sandbox, scoring/reward formula and thresholds, the bounded YAML
+loader, and the other active tasks.
