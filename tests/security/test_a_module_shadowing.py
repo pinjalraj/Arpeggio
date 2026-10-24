@@ -73,18 +73,20 @@ class StructureTest(unittest.TestCase):
                          "verifier still carries an inline snippet executor")
 
     def test_programs_are_structured_and_carry_no_expected_answers(self):
-        for task_id in ("slugify", "parse_duration", "merge_intervals", "lru_cache", "bulk_discount"):
-            task = ENV.build_task(task_id, 0)
+        from harness import tasks
+        from harness.tasks import Raises
+        for task_id in tasks.TASKS:                # every active task, whatever the registry holds
+            task = tasks.build_task(task_id, 0)
             for case in task.cases:
                 if case.program is None:          # harness-side file check, never sent to the worker
                     continue
-                self.assertLessEqual(set(case.program) | set(), self.ALLOWED_TOP)
+                self.assertLessEqual(set(case.program), self.ALLOWED_TOP)
                 for step in case.program["steps"]:
                     self.assertLessEqual(set(step), self.ALLOWED_STEP, f"{task_id}: unexpected step key")
-            # The expected exception type must not be embedded anywhere in what the worker receives.
-            if task_id == "parse_duration":
-                blob = json.dumps([c.program for c in task.cases])
-                self.assertNotIn("ValueError", blob, "expected outcome leaked into the worker program")
+                # An expected exception type must never be embedded in what the worker receives.
+                if isinstance(case.expect, Raises):
+                    self.assertNotIn(case.expect.name, json.dumps(case.program),
+                                     f"{task_id}: expected outcome leaked into the worker program")
 
     def test_rejects_arbitrary_source_as_a_case(self):
         with self.assertRaises(VERIFIER.BadRequest):

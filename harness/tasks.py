@@ -389,13 +389,138 @@ def compose_task(seed):
     )
 
 
+# ---------------------------------------------- ci_workflow_repair (GitHub Actions repair)
+# A DevOps task: a tiny app has its tests under `tests/`, but the CI workflow runs the test
+# discovery against the wrong directory. The fix is to point the workflow's test command at the
+# real tests directory, without touching the app or the tests. Acceptance checks parse the
+# workflow in the trusted harness (bounded YAML loader) and inspect the command semantics.
+_CI_APP = (
+    '"""A tiny calculator exercised by the test suite."""\n\n\n'
+    'def add(a, b):\n    return a + b\n\n\n'
+    'def subtract(a, b):\n    return a - b\n')
+
+_CI_TEST = (
+    "import unittest\n\n"
+    "from calc import add, subtract\n\n\n"
+    "class CalcTest(unittest.TestCase):\n"
+    "    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n\n"
+    "    def test_subtract(self):\n        self.assertEqual(subtract(5, 2), 3)\n\n\n"
+    'if __name__ == "__main__":\n    unittest.main()\n')
+
+_CI_WORKFLOW = (
+    "name: CI\n"
+    "on:\n"
+    "  push:\n"
+    "    branches: [ main ]\n"
+    "jobs:\n"
+    "  test:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@v4\n"
+    "      - uses: actions/setup-python@v5\n"
+    "        with:\n"
+    '          python-version: "3.12"\n'
+    "      - name: Run unit tests\n"
+    "        run: python -m unittest discover -s {dir} -t .\n")
+
+_CI_BROKEN = _CI_WORKFLOW.format(dir="test")      # wrong: the tests live under ./tests
+_CI_FIXED = _CI_WORKFLOW.format(dir="tests")
+_CI_PATH = ".github/workflows/ci.yml"
+
+
+def _ci_workflow(decoded):
+    return _safe_yaml(decoded[_CI_PATH].decode("utf-8"))
+
+
+def _find_test_run(wf):
+    """The `run` string of the step that invokes the unit-test runner, or None."""
+    for job in (wf.get("jobs") or {}).values():
+        for step in (job.get("steps") or []):
+            run = step.get("run") if isinstance(step, dict) else None
+            if isinstance(run, str) and "unittest" in run:
+                return run
+    return None
+
+
+def _discover_dir(run):
+    """The directory passed to `unittest discover -s <dir>`, or None."""
+    import shlex
+    tokens = shlex.split(run)
+    if "-s" in tokens:
+        i = tokens.index("-s")
+        if i + 1 < len(tokens):
+            return tokens[i + 1]
+    return None
+
+
+def _workflow_events(wf):
+    """Event names for the workflow. PyYAML (YAML 1.1) parses the bare key `on` as boolean True,
+    so look under both the string key and True rather than weakening the check."""
+    on = wf.get("on")
+    if on is None:
+        on = wf.get(True)
+    if isinstance(on, dict):
+        return set(on)
+    if isinstance(on, list):
+        return set(on)
+    if isinstance(on, str):
+        return {on}
+    return set()
+
+
+def ci_task(seed):
+    def discover_dir(decoded):       # target: the test command points at the real tests dir
+        return {"ok": True, "result": _discover_dir(_find_test_run(_ci_workflow(decoded)))}
+
+    def dir_exists(decoded):         # target: that directory actually holds the tests
+        want = _discover_dir(_find_test_run(_ci_workflow(decoded)))
+        present = bool(want) and any(k == want or k.startswith(want + "/") for k in decoded)
+        return {"ok": True, "result": present}
+
+    def runs_unittest(decoded):      # regression: the workflow still runs the tests
+        return {"ok": True, "result": _find_test_run(_ci_workflow(decoded)) is not None}
+
+    def push_trigger(decoded):       # regression: the push trigger survives (handles on->True)
+        return {"ok": True, "result": "push" in _workflow_events(_ci_workflow(decoded))}
+
+    def app_unchanged(decoded):      # regression: the application is untouched
+        return {"ok": True, "result": decoded["calc.py"].decode("utf-8") == _CI_APP}
+
+    def tests_unchanged(decoded):    # regression: the tests are untouched
+        return {"ok": True, "result": decoded["tests/test_calc.py"].decode("utf-8") == _CI_TEST}
+
+    return TaskInstance(
+        task_id="ci_workflow_repair", title="Repair the CI workflow", difficulty="medium",
+        instructions=(
+            "`calc.py` is a small app and its tests live in `tests/`. The GitHub Actions workflow "
+            "at `.github/workflows/ci.yml` is meant to run those tests, but its test command points "
+            "at the wrong directory, so CI never runs them. Fix the `run:` command in "
+            "`.github/workflows/ci.yml` so `unittest discover` targets the real tests directory. "
+            "Do not change `calc.py` or the tests. Success: the workflow's test step discovers tests "
+            "from the directory that actually contains them, and the push trigger and test run remain."),
+        files={"calc.py": _CI_APP, "tests/test_calc.py": _CI_TEST, _CI_PATH: _CI_BROKEN},
+        cases=[
+            Case("target", None, "tests", check=discover_dir),
+            Case("target", None, True, check=dir_exists),
+            Case("regression", None, True, check=runs_unittest),
+            Case("regression", None, True, check=push_trigger),
+            Case("regression", None, True, check=app_unchanged),
+            Case("regression", None, True, check=tests_unchanged),
+        ],
+        reference={_CI_PATH: _CI_FIXED},
+    )
+
+
+# Active task registry. The starter Python-utility `parse_duration` has been retired from the
+# active set (its `duration_task` is kept above as shared reference code); the benchmark is moving
+# to DevOps config-repair tasks. At least five tasks stay active at all times.
 TASKS = {
     "slugify": slugify_task,
-    "parse_duration": duration_task,
     "merge_intervals": intervals_task,
     "lru_cache": lru_task,
     "bulk_discount": discount_task,
     "compose_port_alignment": compose_task,
+    "ci_workflow_repair": ci_task,
 }
 DEMO_TASK = "slugify"
 

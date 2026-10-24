@@ -765,3 +765,67 @@ Remaining limitation: the limits are generous fixed constants suited to small co
 needing larger YAML would need them raised. The exception-outcome forging residual (section 12.4) is
 unrelated and still open. Files changed: `harness/tasks.py` (loader + limits),
 `tests/security/test_f_compose_task.py` (YAML-limit tests), this report.
+
+## 17. Task library — ci_workflow_repair (Task 2) and first legacy retirement
+
+### 17.1 Registry change
+The active registry moved from the five Python-utility starters + `compose_port_alignment` to six
+DevOps-leaning tasks. `parse_duration` was **retired from the active registry** (its `duration_task`
+function is kept in `harness/tasks.py` as shared reference code) and `ci_workflow_repair` added.
+
+Why `parse_duration`: it is an "easy" Python-utility starter with no coupling to shared infrastructure
+— not the demo task, not a default `TASK_ID`, not the seed example, and not referenced by `run.py`,
+Docker config or `.env.example`. The only reference was one assertion in
+`tests/security/test_a_module_shadowing.py`. That assertion (an expected exception type must not be
+embedded in a worker program) was generalized to run over **every active task that has a `Raises`
+expectation**, so the invariant is still enforced for any future task without naming `parse_duration`.
+The active set never drops below five (six after this change).
+
+### 17.2 ci_workflow_repair
+Workspace: `calc.py` (a tiny app), `tests/test_calc.py` (its unit tests), and
+`.github/workflows/ci.yml` (a GitHub Actions workflow). The workflow's test step runs
+`python -m unittest discover -s test -t .`, but the tests live under `tests/`, so CI never runs them.
+The agent must fix the `run:` command to target `tests` without changing the app or the tests.
+
+Acceptance checks (trusted, harness-side, via the bounded YAML loader; expected values never sent to
+candidate code): two targets — the discovered directory is `tests`, and that directory actually holds
+the tests — and four regressions — the workflow still runs unittest, the push trigger survives, and
+`calc.py` and the tests are byte-for-byte unchanged. The `run` command is parsed with `shlex` and the
+`-s` argument inspected (command semantics, not a string match).
+
+YAML 1.1 `on` quirk: PyYAML parses the bare key `on` as boolean `True`. The event lookup
+(`_workflow_events`) checks both the string key and `True`, so the push-trigger regression is correct
+rather than weakened. A focused test asserts this.
+
+### 17.3 Results
+- Unit tests in the harness image (PyYAML present): `test_g_ci_task` 6/6 OK — registered & `parse_duration`
+  retired; checks are file-based (no program); deterministic reset; `on`->True handled; reference ≥ 0.95
+  and no-op ≤ 0.05; editing the app is rejected.
+- Host full suite (no PyYAML): 55 tests OK, 15 skipped (YAML scoring tests, privilege-drop tests, Windows
+  symlink). No failures; the five retained tasks and all security regression tests still pass.
+- `docker compose config` → VALID.
+- Baseline gate, active registry (6 tasks): all pass — oracle 1.00, no-op 0.00 for every task including
+  `ci_workflow_repair`; 15.14 s; exit 0; `logs/20261024-145845/gate.json`. Gate task list confirmed:
+  slugify, merge_intervals, lru_cache, bulk_discount, compose_port_alignment, ci_workflow_repair
+  (parse_duration absent). Thresholds unchanged.
+- Offline demo (`TASK_ID=ci_workflow_repair`): success, reward 1.0; exit 0.
+- Determinism: seed 0 and seed 11 give identical files and the same `/state` hash.
+
+### 17.4 Remaining limitations
+- The acceptance checks assert the workflow *configuration* is correct (the command targets the real
+  tests dir); they do not execute the workflow or run the tests in CI. That is by design for the
+  offline harness.
+- The exception-outcome forging residual (section 12.4) is unrelated and still open; this task uses only
+  harness-side file checks, so it is not exposed to it.
+
+### 17.5 Files changed in this phase
+| File | Change |
+|---|---|
+| `harness/tasks.py` | new `ci_workflow_repair` task + helpers (`_find_test_run`, `_discover_dir`, `_workflow_events`); retired `parse_duration` from `TASKS` (function kept) |
+| `tests/security/test_g_ci_task.py` | **new**: task, `on`-quirk, reference/no-op and regression tests |
+| `tests/security/test_a_module_shadowing.py` | structure/leak test now iterates the active registry and any `Raises` case (no hard-coded `parse_duration`) |
+| `README.md` | intro reflects six active tasks and the two check kinds |
+| `audit-notes/security_test_report.md` | this section |
+
+Unchanged: the verifier and worker, the sandbox, scoring/reward formula and thresholds, the bounded YAML
+loader, and the four other active tasks.
