@@ -41,6 +41,24 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def tool_call_history(call):
+    """One assistant tool_call as stored in the conversation, replaying any provider-specific
+    fields (e.g. Gemini's extra_content) exactly as returned, without overriding the core keys."""
+    entry = {"id": call.id, "type": "function",
+             "function": {"name": call.name, "arguments": call.history_arguments()}}
+    for key, value in (getattr(call, "extra", None) or {}).items():
+        entry.setdefault(key, value)
+    return entry
+
+
+def assistant_message(reply):
+    """Rebuild the assistant turn for the next request, preserving tool-call metadata."""
+    message = {"role": "assistant", "content": reply.text}
+    if reply.tool_calls:
+        message["tool_calls"] = [tool_call_history(c) for c in reply.tool_calls]
+    return message
+
+
 def show(record):
     """One readable line per step on the terminal (live telemetry)."""
     tools = ",".join(a.get("tool", "?") for a in record["parsed_actions"]) or "-"
@@ -137,12 +155,7 @@ def run_episode(env, task_id, seed, client, append_text, limits, log):
         record["model_output_raw"], record["tokens"] = reply.raw, reply.tokens
 
         # keep every tool call in the history so each one gets a matching result
-        assistant = {"role": "assistant", "content": reply.text}
-        if reply.tool_calls:
-            assistant["tool_calls"] = [{"id": c.id, "type": "function",
-                                        "function": {"name": c.name, "arguments": c.history_arguments()}}
-                                       for c in reply.tool_calls]
-        messages.append(assistant)
+        messages.append(assistant_message(reply))
 
         if not reply.tool_calls:
             record["errors"].append({"kind": "no_tool_call", "detail": "reply contained no tool call"})

@@ -8,6 +8,8 @@ class ToolCall:
     id: str
     name: str
     arguments: str          # raw text exactly as the model sent it
+    extra: dict = field(default_factory=dict)   # provider-specific tool_call fields to replay
+                                                 # as-is, e.g. Gemini's extra_content.google.thought_signature
 
     def parse(self):
         """Return (args, error). `args` is a dict when the arguments are valid JSON."""
@@ -34,6 +36,20 @@ class Reply:
     tokens: int = 0
 
 
+def tool_calls_from_message(message):
+    """Parse the SDK message's tool calls, keeping any non-standard per-call fields (such as
+    Gemini's `extra_content`) so they can be replayed on the next request exactly as returned."""
+    calls = []
+    for index, call in enumerate(getattr(message, "tool_calls", None) or []):
+        function = getattr(call, "function", None)
+        extra = dict(getattr(call, "model_extra", None) or {})   # fields outside the OpenAI schema
+        calls.append(ToolCall(id=call.id or f"call_{index}",
+                              name=(function.name if function else "") or "",
+                              arguments=(function.arguments if function else "") or "",
+                              extra=extra))
+    return calls
+
+
 # ------------------------------------------------------------ real models
 class OpenAIClient:
     """Calls any model through an OpenAI-compatible endpoint.
@@ -57,12 +73,7 @@ class OpenAIClient:
             kwargs["max_tokens"] = self.max_tokens      # optional: set MAX_TOKENS to cap each reply
         response = self.client.chat.completions.create(**kwargs)
         message = response.choices[0].message
-        calls = []
-        for index, call in enumerate(message.tool_calls or []):
-            function = getattr(call, "function", None)
-            calls.append(ToolCall(id=call.id or f"call_{index}",
-                                  name=(function.name if function else "") or "",
-                                  arguments=(function.arguments if function else "") or ""))
+        calls = tool_calls_from_message(message)
         usage = getattr(response, "usage", None)
         return Reply(text=message.content, tool_calls=calls, raw=response.model_dump_json(),
                      tokens=getattr(usage, "total_tokens", 0) or 0)
