@@ -29,8 +29,9 @@ class Raises:
 @dataclass
 class Case:
     group: str      # "target": fails before the fix.  "regression": must keep passing.
-    program: dict   # {"module": str, "steps": [...]} run by the verifier worker
+    program: dict   # {"module": str, "steps": [...]} run by the verifier worker, or None for a file check
     expect: object  # compared in the harness only; never sent to the worker
+    check: object = None  # trusted harness-side check(files)->result for config/file tasks (program is None)
 
 
 @dataclass
@@ -238,12 +239,163 @@ def discount_task(seed):
     )
 
 
+# ---------------------------------------------- compose_port_alignment (YAML config repair)
+# A DevOps task: the app listens on 8080, but docker-compose.yml maps the host's 8081 to the
+# wrong container port and health-checks the wrong port. The fix is to align the container port
+# and the health-check with the app's 8080, keeping the host port 8081. Acceptance checks parse
+# the resulting files in the trusted harness (never in candidate code); expected values stay here.
+_COMPOSE_APP = (
+    '"""A tiny web app. It serves /health on PORT."""\n'
+    'from http.server import BaseHTTPRequestHandler, HTTPServer\n\n'
+    'PORT = 8080\n\n\n'
+    'class Handler(BaseHTTPRequestHandler):\n'
+    '    def do_GET(self):\n'
+    '        self.send_response(200 if self.path == "/health" else 404)\n'
+    '        self.end_headers()\n'
+    '        self.wfile.write(b"ok")\n\n'
+    '    def log_message(self, *args):\n'
+    '        pass\n\n\n'
+    'if __name__ == "__main__":\n'
+    '    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()\n')
+
+_COMPOSE_DOCKERFILE = (
+    "FROM python:3.12-slim\n"
+    "COPY app.py /app/app.py\n"
+    "WORKDIR /app\n"
+    "EXPOSE 8080\n"
+    'CMD ["python", "app.py"]\n')
+
+_COMPOSE_BROKEN = (
+    "services:\n"
+    "  web:\n"
+    "    build: .\n"
+    "    ports:\n"
+    '      - "8081:9090"          # host 8081 is correct; the container port is wrong\n'
+    "    healthcheck:\n"
+    '      test: ["CMD", "python", "-c", "import urllib.request; '
+    "urllib.request.urlopen('http://localhost:9090/health')\"]\n"
+    "      interval: 5s\n"
+    "      timeout: 3s\n"
+    "      retries: 5\n")
+
+_COMPOSE_FIXED = (
+    "services:\n"
+    "  web:\n"
+    "    build: .\n"
+    "    ports:\n"
+    '      - "8081:8080"\n'
+    "    healthcheck:\n"
+    '      test: ["CMD", "python", "-c", "import urllib.request; '
+    "urllib.request.urlopen('http://localhost:8080/health')\"]\n"
+    "      interval: 5s\n"
+    "      timeout: 3s\n"
+    "      retries: 5\n")
+
+
+# Bounds for untrusted YAML parsed in the harness. A compose file is tiny; these are generous.
+_YAML_MAX_BYTES = 65536
+_YAML_MAX_NODES = 10000
+_YAML_MAX_ALIASES = 50
+_YAML_MAX_DEPTH = 100
+
+
+def _safe_yaml(text):
+    """Parse untrusted YAML with the safe loader, after rejecting oversized or excessively complex
+    input. The pre-scan uses the event stream (yaml.parse), which does not expand aliases or build
+    Python objects, so it is bounded by the document size; over-limit input raises ValueError."""
+    import yaml
+    if len(text.encode("utf-8")) > _YAML_MAX_BYTES:
+        raise ValueError("yaml exceeds size limit")
+    depth = max_depth = nodes = aliases = 0
+    for event in yaml.parse(text, Loader=yaml.SafeLoader):
+        name = type(event).__name__
+        if name in ("MappingStartEvent", "SequenceStartEvent"):
+            depth += 1
+            max_depth = max(max_depth, depth)
+            nodes += 1
+        elif name in ("MappingEndEvent", "SequenceEndEvent"):
+            depth -= 1
+        elif name == "ScalarEvent":
+            nodes += 1
+        elif name == "AliasEvent":
+            aliases += 1
+            nodes += 1
+        if nodes > _YAML_MAX_NODES or aliases > _YAML_MAX_ALIASES or max_depth > _YAML_MAX_DEPTH:
+            raise ValueError("yaml too complex (node/alias/depth limit)")
+    return yaml.safe_load(text)
+
+
+def _yaml_load(decoded, path):
+    return _safe_yaml(decoded[path].decode("utf-8"))
+
+
+def _port_map(ports):
+    """Map {host_port: container_port} from a compose `ports` list (short or long syntax)."""
+    mapping = {}
+    for entry in ports or []:
+        if isinstance(entry, dict):
+            mapping[int(entry["published"])] = int(entry["target"])
+        else:
+            parts = str(entry).split(":")
+            if len(parts) >= 2:
+                mapping[int(parts[-2])] = int(parts[-1])
+    return mapping
+
+
+def _healthcheck_port(decoded):
+    import re
+    test = _yaml_load(decoded, "docker-compose.yml")["services"]["web"]["healthcheck"]["test"]
+    text = " ".join(test) if isinstance(test, list) else str(test)
+    found = [int(p) for p in re.findall(r"localhost:(\d+)", text)]
+    return found[0] if found else None
+
+
+def compose_task(seed):
+    def container_port(decoded):     # target: the host-8081 mapping must reach the app's 8080
+        ports = _yaml_load(decoded, "docker-compose.yml")["services"]["web"]["ports"]
+        return {"ok": True, "result": _port_map(ports).get(8081)}
+
+    def health_port(decoded):        # target: the health check must hit the app's 8080
+        return {"ok": True, "result": _healthcheck_port(decoded)}
+
+    def host_ports(decoded):         # regression: the host port stays 8081, nothing else added
+        ports = _yaml_load(decoded, "docker-compose.yml")["services"]["web"]["ports"]
+        return {"ok": True, "result": sorted(_port_map(ports))}
+
+    def app_port(decoded):           # regression: the app itself still listens on 8080
+        import re
+        match = re.search(r"PORT\s*=\s*(\d+)", decoded["app.py"].decode("utf-8"))
+        return {"ok": True, "result": int(match.group(1)) if match else None}
+
+    return TaskInstance(
+        task_id="compose_port_alignment", title="Align the Compose ports", difficulty="medium",
+        instructions=(
+            "The app in `app.py` serves its health endpoint on the port named by its `PORT` "
+            "constant. `docker-compose.yml` is meant to publish that app on host port 8081, but "
+            "its container-port mapping and its health-check port are wrong. Fix "
+            "`docker-compose.yml` so the host port 8081 maps to the app's real port and the "
+            "health check targets that same port. Keep host port 8081 and do not change the app. "
+            "Success: `services.web.ports` maps 8081 to the app's port, and "
+            "`services.web.healthcheck` targets the app's port."),
+        files={"app.py": _COMPOSE_APP, "Dockerfile": _COMPOSE_DOCKERFILE,
+               "docker-compose.yml": _COMPOSE_BROKEN},
+        cases=[
+            Case("target", None, 8080, check=container_port),
+            Case("target", None, 8080, check=health_port),
+            Case("regression", None, [8081], check=host_ports),
+            Case("regression", None, 8080, check=app_port),
+        ],
+        reference={"docker-compose.yml": _COMPOSE_FIXED},
+    )
+
+
 TASKS = {
     "slugify": slugify_task,
     "parse_duration": duration_task,
     "merge_intervals": intervals_task,
     "lru_cache": lru_task,
     "bulk_discount": discount_task,
+    "compose_port_alignment": compose_task,
 }
 DEMO_TASK = "slugify"
 

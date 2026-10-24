@@ -2,6 +2,7 @@
 # dependency can resolve to a new major version on the judges' machine.
 openai==1.109.1
 requests==2.32.5
+PyYAML==6.0.2       # harness-side parsing of YAML config tasks (e.g. compose_port_alignment)
 
 # transitive
 annotated-types==0.8.0

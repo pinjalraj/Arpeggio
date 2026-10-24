@@ -79,14 +79,27 @@ class Env:
         files, problem = check_snapshot(self._get("/snapshot", self.tool_timeout))
         if problem:     # an unusable workspace fails every check instead of being cut short
             return _zero(problem)
-        response = self._verify({"files": files, "cases": [c.program for c in cases]},
-                                self.verify_timeout)
-        results = response.get("results") if isinstance(response, dict) else None
-        # The verifier reply is untrusted: require exactly one result per case, or fail closed.
-        if not isinstance(results, list) or len(results) != len(cases):
-            return _zero("verifier returned a malformed or wrong-length result set")
+        # Two kinds of case: a `program` runs candidate code in the verifier; a `check` is a
+        # trusted, harness-side inspection of the resulting files (e.g. parsing YAML config).
+        # Expected answers stay here either way and are never sent to the verifier/candidate.
+        program_cases = [c for c in cases if c.program is not None]
+        results = iter(())
+        if program_cases:
+            response = self._verify({"files": files, "cases": [c.program for c in program_cases]},
+                                    self.verify_timeout)
+            vresults = response.get("results") if isinstance(response, dict) else None
+            if not isinstance(vresults, list) or len(vresults) != len(program_cases):
+                return _zero("verifier returned a malformed or wrong-length result set")
+            results = iter(vresults)
+        decoded = None
         tally = {"target": [0, 0], "regression": [0, 0]}
-        for case, result in zip(cases, results):
+        for case in cases:
+            if case.program is not None:
+                result = next(results)
+            else:
+                if decoded is None:
+                    decoded = _decode_snapshot(files)
+                result = _run_file_check(case.check, decoded)
             tally[case.group][1] += 1
             tally[case.group][0] += 1 if _passed(result, case.expect) else 0
         target = tally["target"][0] / max(1, tally["target"][1])
@@ -134,6 +147,21 @@ def _safe_relative(name):
 
 def _zero(error):
     return {"tests_passed": 0.0, "no_regressions": 0.0, "total": 0.0, "error": error}
+
+
+def _decode_snapshot(files):
+    """Decode a validated snapshot {path: base64} into {path: bytes} for harness-side checks."""
+    return {name: base64.b64decode(data) for name, data in files.items()}
+
+
+def _run_file_check(check, decoded):
+    """Run a trusted, harness-side file check. It inspects the resulting workspace files and
+    returns {"ok": True, "result": value} (compared to `expect`), or fails safe on any error."""
+    try:
+        result = check(decoded)
+        return result if isinstance(result, dict) else {"ok": False, "exc": "BadCheck"}
+    except Exception as exc:
+        return {"ok": False, "exc": type(exc).__name__}
 
 
 def _passed(result, expect):

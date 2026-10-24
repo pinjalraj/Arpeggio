@@ -661,3 +661,107 @@ process killed on reset; all baselines and the demo still pass; clean build work
 
 Unchanged: `harness/*` (the phase C/D `env.py`/`runner.py` changes stand), `verifier/*`, `harness/tasks.py`,
 the reference solutions, scoring and reward formula.
+
+## 16. Task library — compose_port_alignment (first DevOps task)
+
+A new sixth task was added; the five starter tasks are unchanged.
+
+### 16.1 What it is
+A config-repair task. The workspace has a tiny web app (`app.py`, listens on port 8080), a
+`Dockerfile`, and a `docker-compose.yml` whose container-port mapping and health-check port are
+wrong while the host port 8081 is correct. The agent must read the app and the compose file, see
+that the app uses 8080, and fix `docker-compose.yml` so host 8081 maps to 8080 and the health
+check targets 8080 — without changing the app. Task id: `compose_port_alignment`, difficulty
+medium. It uses the existing tools (`read_file`, `write_file`, …); no new tool was needed.
+
+### 16.2 Verifier compatibility — trusted file-inspection checks
+The existing verifier runs candidate *Python* modules. A YAML task has no module to call, so the
+smallest safe extension was a second kind of check that needs **no candidate code at all**:
+
+- A `Case` may now carry a trusted `check(files)` callable instead of a `program`. When `program`
+  is `None`, `Env.score` decodes the workspace snapshot and runs the check **in the harness**
+  (`harness/env.py` → `_decode_snapshot`, `_run_file_check`). The check parses the file with
+  `yaml.safe_load` and returns a value that is compared to the expected value with the same strict
+  `_passed`/`_equal` logic.
+- Expected values stay in the harness and are **never** sent to the verifier or the candidate; the
+  verifier and its worker are unchanged, and `program`-based tasks still run exactly as before.
+- The four acceptance checks are programmatic, not string matches: they parse the compose YAML and
+  the app source and assert the container port for host 8081 is the app's port, the health-check
+  port is the app's port (both target checks), and — as regressions — the host port stays 8081 and
+  the app still listens on 8080 (so "fixing" by editing the app instead is rejected).
+- One pinned dependency was added for this: `PyYAML==6.0.2` in `requirements.txt` (harness image
+  only). The verifier and sandbox images gain nothing.
+
+Safety note: YAML is parsed with a bounded loader, `harness/tasks.py::_safe_yaml` (see section 16.6).
+`yaml.safe_load` executes no code, and before it runs the loader rejects oversized or excessively
+complex input. Any rejection raises `ValueError`, which `_run_file_check` turns into a failed check
+(a controlled task failure), never a harness crash.
+
+### 16.3 Results (commands and outcomes)
+- Unit tests, harness image (has PyYAML): `python -B -m unittest discover -s tests/security -p
+  "test_f_compose_task.py"` → 5 tests OK: file-check-not-sent-to-verifier, deterministic reset,
+  reference ≥ 0.95, no-op ≤ 0.05, wrong-repair (edit the app) rejected, partial-repair < 0.95.
+- Full unit suite on host (no PyYAML): 44 tests OK, 7 skipped (the 3 YAML scoring tests, the 3
+  privilege-drop tests, and the Windows symlink test). No failures; the five starter tasks and
+  their structure tests still pass.
+- `docker compose config` → VALID.
+- Baseline gate, all six tasks (`MODE=baselines docker compose up --build …`) → all pass;
+  `compose_port_alignment` oracle 1.00 (≥ 0.95), no-op 0.00 (≤ 0.05); 15.36 s; exit 0;
+  `logs/20261024-143048/gate.json`. Thresholds were not changed.
+- Offline demo (`TASK_ID=compose_port_alignment docker compose up …`) → success, reward 1.0, 2 steps,
+  exit 0.
+- Determinism: `build_task("compose_port_alignment", 0)` and `… 7)` give identical files and the
+  same `/state` hash (the task ignores the seed, like the other fixed tasks).
+- Logs: the expected answers / per-case results do not appear in `episode.jsonl` or `gate.jsonl`
+  (the repaired compose the agent writes naturally contains `8080`, but that is its own work
+  product, not a leaked expected value).
+
+### 16.4 Unchanged limitation
+The exception-outcome forging residual from section 12.4 is **not** fixed and is unrelated to this
+task: `compose_port_alignment` uses only harness-side file checks (no candidate worker), so it is
+not exposed to that residual, but the residual still stands for the module-based tasks.
+
+### 16.5 Files changed in this phase
+| File | Change |
+|---|---|
+| `harness/tasks.py` | `Case` gains a `check` field; new `compose_port_alignment` task (files, instructions, four file-check cases, reference); registered in `TASKS` |
+| `harness/env.py` | `score()` runs `program=None` cases as trusted harness-side file checks; `_decode_snapshot`, `_run_file_check` |
+| `requirements.txt` | add `PyYAML==6.0.2` (harness only) |
+| `tests/security/test_f_compose_task.py` | **new**: task and file-check unit tests |
+| `tests/security/test_a_module_shadowing.py` | structure test skips file-check cases (no program) |
+| `audit-notes/security_test_report.md` | this section |
+
+Unchanged: the verifier and worker, the sandbox, the scoring/reward formula and thresholds, and the
+five starter tasks.
+
+## 16.6 Hardening — bounded YAML loader
+
+The untrusted YAML parsed in the harness is now vetted before `safe_load`.
+
+- `harness/tasks.py::_safe_yaml(text)`:
+  1. rejects input over **64 KB** (`_YAML_MAX_BYTES`);
+  2. pre-scans the **event stream** (`yaml.parse` with `SafeLoader`) — events do not build Python
+     objects and do not expand aliases, so the scan is bounded by the document size — counting nodes,
+     alias events and nesting depth, and raising `ValueError` as soon as any exceeds its limit
+     (**10000 nodes, 50 aliases, depth 100**);
+  3. only then calls `yaml.safe_load` (no custom objects, no code execution).
+- An over-limit document therefore never reaches `safe_load`, so an alias-heavy / deeply-nested /
+  huge document cannot drive expansion in the harness. A rejection is a `ValueError`, caught by
+  `_run_file_check` as a failed check — a controlled task failure, not a crash. The four acceptance
+  checks and the reference/no-op thresholds are unchanged.
+
+Results:
+- Focused YAML tests in `tests/security/test_f_compose_task.py::SafeYamlLimitsTest` (run in the
+  harness image, which has PyYAML): **5/5 OK** — normal compose files load; oversized, deeply nested,
+  alias-heavy, and many-node inputs are each rejected with `ValueError`.
+- Full `test_f_compose_task` in the harness image: **10/10 OK**. On host (no PyYAML) the YAML tests
+  skip.
+- Six-task baseline gate (`MODE=baselines docker compose up --build …`): all pass; oracle 1.00,
+  no-op 0.00 for every task including `compose_port_alignment`; 19.17 s; exit 0;
+  `logs/20261024-143745/gate.json`.
+- Offline demo (`TASK_ID=compose_port_alignment`): success, reward 1.0; exit 0.
+
+Remaining limitation: the limits are generous fixed constants suited to small config files; a task
+needing larger YAML would need them raised. The exception-outcome forging residual (section 12.4) is
+unrelated and still open. Files changed: `harness/tasks.py` (loader + limits),
+`tests/security/test_f_compose_task.py` (YAML-limit tests), this report.

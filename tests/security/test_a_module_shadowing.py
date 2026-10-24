@@ -76,6 +76,8 @@ class StructureTest(unittest.TestCase):
         for task_id in ("slugify", "parse_duration", "merge_intervals", "lru_cache", "bulk_discount"):
             task = ENV.build_task(task_id, 0)
             for case in task.cases:
+                if case.program is None:          # harness-side file check, never sent to the worker
+                    continue
                 self.assertLessEqual(set(case.program) | set(), self.ALLOWED_TOP)
                 for step in case.program["steps"]:
                     self.assertLessEqual(set(step), self.ALLOWED_STEP, f"{task_id}: unexpected step key")
