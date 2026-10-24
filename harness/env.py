@@ -75,17 +75,17 @@ class Env:
         cases = self.task.cases
         files, problem = check_snapshot(self._get("/snapshot", self.tool_timeout))
         if problem:     # an unusable workspace fails every check instead of being cut short
-            return {"tests_passed": 0.0, "no_regressions": 0.0, "total": 0.0, "error": problem}
-        results = self._verify({"files": files, "cases": [c.program for c in cases]},
-                               self.verify_timeout)["results"]
+            return _zero(problem)
+        response = self._verify({"files": files, "cases": [c.program for c in cases]},
+                                self.verify_timeout)
+        results = response.get("results") if isinstance(response, dict) else None
+        # The verifier reply is untrusted: require exactly one result per case, or fail closed.
+        if not isinstance(results, list) or len(results) != len(cases):
+            return _zero("verifier returned a malformed or wrong-length result set")
         tally = {"target": [0, 0], "regression": [0, 0]}
         for case, result in zip(cases, results):
-            if isinstance(case.expect, Raises):
-                passed = (not result.get("ok")) and result.get("exc") == case.expect.name
-            else:
-                passed = result.get("ok") and _equal(result.get("result"), case.expect)
             tally[case.group][1] += 1
-            tally[case.group][0] += 1 if passed else 0
+            tally[case.group][0] += 1 if _passed(result, case.expect) else 0
         target = tally["target"][0] / max(1, tally["target"][1])
         regression = tally["regression"][0] / max(1, tally["regression"][1])
         components = {"tests_passed": round(0.7 * target, 4),
@@ -129,7 +129,24 @@ def _safe_relative(name):
     return not any(part in ("", ".", "..") for part in PurePosixPath(name).parts)
 
 
+def _zero(error):
+    return {"tests_passed": 0.0, "no_regressions": 0.0, "total": 0.0, "error": error}
+
+
+def _passed(result, expect):
+    """Decide one case against its expected outcome. The result is untrusted worker output,
+    so its shape is checked here and a successful result must say ok is exactly True."""
+    if not isinstance(result, dict):
+        return False
+    if isinstance(expect, Raises):
+        return result.get("ok") is False and result.get("exc") == expect.name
+    return result.get("ok") is True and _equal(result.get("result"), expect)
+
+
 def _equal(a, b):
-    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool):
+    # A bool must match only a bool, so a result of True never counts as the integer 1.
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return abs(a - b) < 1e-9
     return a == b

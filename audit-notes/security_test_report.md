@@ -14,10 +14,11 @@
 | ID | Weakness | Result |
 |----|----------|--------|
 | A  | Agent-created `json.py` runs inside hidden-check execution; check source reachable from the agent | **FIXED in phase 2** (was CONFIRMED VULNERABILITY; see section 11) |
-| B1 | Missing verifier results are silently ignored (score inflated) | **CONFIRMED VULNERABILITY** |
-| B2 | Truthy non-boolean `ok` value counts as a pass | **CONFIRMED VULNERABILITY** (only reachable if sandbox output is untrusted) |
-| B3 | Malformed (non-object) result crashes scoring | **CONFIRMED VULNERABILITY** (robustness / crash) |
-| B4 | Boolean `True` matches an expected integer `1` | **CONFIRMED VULNERABILITY** (low impact) |
+| B1 | Missing verifier results are silently ignored (score inflated) | **FIXED (phase B)** (was CONFIRMED; see section 13) |
+| B2 | Truthy non-boolean `ok` value counts as a pass | **FIXED (phase B)** (was CONFIRMED) |
+| B3 | Malformed (non-object) result crashes scoring | **FIXED (phase B)** (was CONFIRMED) |
+| B4 | Boolean `True` matches an expected integer `1` | **FIXED (phase B)** (was CONFIRMED) |
+| B-extra | Extra verifier results | FIXED: an exact count is now required (was NOT REPRODUCED) |
 | B5 | Extra trailing results change the score | NOT REPRODUCED |
 | B6 | Agent-printed fake result markers inside the check process | NOT TESTED |
 | C-pre | Preconditions for interference: agent code runs as the same user as the server and can reach its port | **CONFIRMED PRECONDITION** (container) |
@@ -440,3 +441,54 @@ is unchanged: same inputs, same expected outputs as the original snippets.
 
 Unchanged in phase 3: `harness/runner.py`, `harness/run.py` (phase 2 already added `VERIFIER_URL`),
 `docker-compose.yml` (phase 2), the sandbox, the tasks' reference solutions and reward formula.
+
+## 13. Issue B — Scoring correctness
+
+### 13.1 What was wrong and what changed
+
+`Env.score` trusted the verifier reply and compared loosely, which let four things slip through
+(all reproduced by `tests/security/test_b_result_handling.py`). The fix is in `harness/env.py`
+only; the reward formula, the five tasks and their thresholds are unchanged.
+
+| Requirement | Fix in `harness/env.py` |
+|---|---|
+| Exactly one result per case; missing/extra must not inflate the score | `score()` reads `results` from the reply, and if it is not a list or its length ≠ the number of cases, returns a controlled zero (`_zero`) instead of zipping to the shorter list |
+| A pass needs the exact Boolean `True` | `_passed()` requires `result.get("ok") is True` for a value case and `is False` for an expected exception — a truthy `"yes"` or `1` no longer passes |
+| Malformed results must not crash the episode | `_passed()` first checks `isinstance(result, dict)`; a non-dict (or wrong-typed) result is a failed case, not an exception |
+| Booleans must not match integer expectations | `_equal()` now returns `a is b` when either side is a bool, so a result of `True` never equals an expected `1`; genuine `int`/`float` comparisons keep the `1e-9` tolerance |
+| Expected exceptions and return values keep working | the `Raises` path and the value path are both handled in `_passed()`; the five tasks behave exactly as before |
+| Treat worker replies as untrusted | the reply shape, the result count, each result's type and the `ok` flag are all validated in the harness, on top of the verifier's own `sanitize_result` |
+
+`_zero()` returns `{"tests_passed": 0.0, "no_regressions": 0.0, "total": 0.0, "error": ...}` and is also
+used for the existing bad-snapshot case. In normal operation the verifier always returns exactly one
+well-formed result per case, so the count guard never trips for honest runs.
+
+### 13.2 Test results
+
+| Check | Result |
+|---|---|
+| `test_b_result_handling.py` (6 tests: baseline, missing, extra, malformed, truthy-ok, bool≠int) | **all PASS** (were failing by design before this change) |
+| Full unit suite, Windows/Python 3.14.5 | 27 tests: 25 PASS, 1 FAIL (D1, still open), 1 SKIP (symlink needs Linux) |
+| Full unit suite, Linux/Python 3.12.15, disposable container | 27 tests: 26 PASS, 1 FAIL (D1) |
+| `MODE=baselines` full stack, all 5 tasks | PASS: oracle 1.00, no-op 0.00 for every task; 16.34 s; exit 0; `logs/20261024-125852/gate.json` |
+| Offline `mock/solver` demo | PASS: success, reward 1.0, 2 steps; exit 0 |
+
+The only remaining unit failure is `test_d_reset_state.py::test_files_written_outside_workspace_are_cleared`
+(Issue D, reset cleanup), which is out of scope for this phase.
+
+### 13.3 Remaining limitations
+
+- The exception-outcome forging residual from section 12.4 is unchanged: scoring is now strict about
+  shape and Booleans, but a candidate that controls its own worker outcome could still report
+  `{"ok": false, "exc": "ValueError"}` for an expected-exception case. Bounded (no expected answers
+  reach the worker; network-isolated) and still **NOT TESTED**.
+- Issue D (files/processes surviving reset) is still open.
+
+### 13.4 Files changed in this phase
+
+| File | Change |
+|---|---|
+| `harness/env.py` | `score()` validates the reply and enforces an exact result count; new `_passed()` (shape + `ok is True`/`is False`); `_equal()` makes bools match only bools; new `_zero()` helper |
+| `audit-notes/security_test_report.md` | this section and the summary-table updates |
+
+No other files changed. The verifier, sandbox, tasks, Docker config and reward formula are untouched.
