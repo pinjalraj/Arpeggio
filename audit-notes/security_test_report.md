@@ -829,3 +829,58 @@ rather than weakened. A focused test asserts this.
 
 Unchanged: the verifier and worker, the sandbox, scoring/reward formula and thresholds, the bounded YAML
 loader, and the four other active tasks.
+
+## 18. Task library — healthy_service_startup (Task 3) and second legacy retirement
+
+### 18.1 healthy_service_startup
+A two-service readiness-dependency repair. `docker-compose.yml` has an `app` and a `db`. Two faults:
+the `db` health check does not test readiness (`test: ["CMD-SHELL", "echo ok"]`), and `app`'s
+`depends_on` is the list form (start order only). The agent must make the `db` health check use
+`pg_isready` and set `app.depends_on.db.condition: service_healthy`, keeping everything else.
+
+Acceptance checks (trusted, harness-side, bounded YAML loader; expected values never sent to candidate
+code): two targets — the db health-check `test` contains `pg_isready`, and `app.depends_on.db.condition
+== service_healthy` (the list form yields no condition, so it fails before the fix) — and four
+regressions pinning unrelated config: the service names `{app, db}`, the app port mapping `8080:8080`,
+the db image `postgres:16`, and the app `DATABASE_URL`. The contract (`pg_isready` + `service_healthy`)
+is stated verbatim in the task instructions, and the checks assert exactly that.
+
+### 18.2 Second retirement
+After Task 3 passed its focused tests and reference/no-op baselines, `merge_intervals` was retired from
+the active registry (its `intervals_task` function stays as shared reference code). It is a single-
+function Python-utility starter referenced only within `harness/tasks.py`; it is not the demo task, not
+a default, not the seed example, and the security structure/leak test already iterates the active
+registry rather than naming tasks, so nothing broke. Active registry: `slugify`, `lru_cache`,
+`bulk_discount`, `compose_port_alignment`, `ci_workflow_repair`, `healthy_service_startup` — six tasks,
+never below five (the new task was added and validated before the retirement).
+
+### 18.3 Results
+- Focused tests, harness image (PyYAML): `test_h_hss_task` 5/5 OK — file-based checks (no program),
+  deterministic reset, reference ≥ 0.95 and no-op ≤ 0.05, one-of-two-fixes scores below pass, and
+  changing unrelated config (db image) rejected.
+- Host full suite (no PyYAML): OK, 18 skipped (YAML scoring tests across the three config tasks, the
+  privilege-drop tests, and the Windows symlink). No failures; the retained tasks and all security
+  regression tests pass.
+- `docker compose config` → VALID.
+- Baseline gate, active registry (6 tasks) after retirement: all pass — oracle 1.00, no-op 0.00 for
+  every task including `healthy_service_startup`; 11.19 s; exit 0; `logs/20261024-151243/gate.json`.
+  Gate task list confirmed (merge_intervals and parse_duration absent). Thresholds unchanged.
+- Offline demo (`TASK_ID=healthy_service_startup`): success, reward 1.0; exit 0.
+- Determinism: seed 0 and seed 23 give identical files and the same `/state` hash.
+
+### 18.4 Remaining limitations
+- The checks assert the compose configuration expresses the readiness dependency; they do not start the
+  services or prove the db actually becomes healthy at runtime (offline harness, by design).
+- The exception-outcome forging residual (section 12.4) is unrelated and still open; this task uses only
+  harness-side file checks and is not exposed to it.
+
+### 18.5 Files changed in this phase
+| File | Change |
+|---|---|
+| `harness/tasks.py` | new `healthy_service_startup` task + helpers (`_service`, `_healthcheck_text`, `_depends_condition`, `_service_env`); retired `merge_intervals` from `TASKS` (function kept) |
+| `tests/security/test_h_hss_task.py` | **new**: task, reference/no-op, partial-fix and regression tests |
+| `README.md` | lists the third DevOps task |
+| `audit-notes/security_test_report.md` | this section |
+
+Unchanged: the verifier and worker, the sandbox, scoring/reward formula and thresholds, the bounded YAML
+loader, and the other active tasks.

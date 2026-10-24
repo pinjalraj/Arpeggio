@@ -511,16 +511,157 @@ def ci_task(seed):
     )
 
 
-# Active task registry. The starter Python-utility `parse_duration` has been retired from the
-# active set (its `duration_task` is kept above as shared reference code); the benchmark is moving
-# to DevOps config-repair tasks. At least five tasks stay active at all times.
+# ------------------------------------------ healthy_service_startup (readiness dependency)
+# A DevOps task with two services. The app must start only after the db is *ready*, but the
+# compose file both (a) gives the db a health check that does not test readiness and (b) makes the
+# app depend on the db only for start order. The fix: a pg_isready health check on db, and
+# app.depends_on.db.condition = service_healthy. Everything else must stay unchanged.
+_HSS_APP = (
+    '"""A tiny service that would connect to the database named by DATABASE_URL."""\n'
+    'import os\n\n'
+    'DATABASE_URL = os.environ.get("DATABASE_URL", "")\n'
+    'PORT = 8080\n\n\n'
+    'def main():\n'
+    '    print(f"would serve on {PORT}, db={DATABASE_URL}")\n\n\n'
+    'if __name__ == "__main__":\n    main()\n')
+
+_HSS_DOCKERFILE = (
+    "FROM python:3.12-slim\n"
+    "COPY app.py /app/app.py\n"
+    "WORKDIR /app\n"
+    "EXPOSE 8080\n"
+    'CMD ["python", "app.py"]\n')
+
+_HSS_BROKEN = (
+    "services:\n"
+    "  app:\n"
+    "    build: .\n"
+    "    ports:\n"
+    '      - "8080:8080"\n'
+    "    environment:\n"
+    "      DATABASE_URL: postgres://db:5432/app\n"
+    "    depends_on:\n"
+    "      - db                       # only start order, not readiness\n"
+    "  db:\n"
+    "    image: postgres:16\n"
+    "    environment:\n"
+    "      POSTGRES_PASSWORD: secret\n"
+    "    healthcheck:\n"
+    '      test: ["CMD-SHELL", "echo ok"]   # does not test database readiness\n'
+    "      interval: 5s\n"
+    "      timeout: 3s\n"
+    "      retries: 5\n")
+
+_HSS_FIXED = (
+    "services:\n"
+    "  app:\n"
+    "    build: .\n"
+    "    ports:\n"
+    '      - "8080:8080"\n'
+    "    environment:\n"
+    "      DATABASE_URL: postgres://db:5432/app\n"
+    "    depends_on:\n"
+    "      db:\n"
+    "        condition: service_healthy\n"
+    "  db:\n"
+    "    image: postgres:16\n"
+    "    environment:\n"
+    "      POSTGRES_PASSWORD: secret\n"
+    "    healthcheck:\n"
+    '      test: ["CMD-SHELL", "pg_isready -U postgres"]\n'
+    "      interval: 5s\n"
+    "      timeout: 3s\n"
+    "      retries: 5\n")
+
+
+def _hss_compose(decoded):
+    return _safe_yaml(decoded["docker-compose.yml"].decode("utf-8"))
+
+
+def _service(wf, name):
+    return (wf.get("services") or {}).get(name) or {}
+
+
+def _healthcheck_text(service):
+    test = (service.get("healthcheck") or {}).get("test")
+    if isinstance(test, list):
+        return " ".join(str(t) for t in test)
+    return str(test) if test is not None else ""
+
+
+def _depends_condition(service, dep):
+    deps = service.get("depends_on")
+    if isinstance(deps, dict) and isinstance(deps.get(dep), dict):
+        return deps[dep].get("condition")
+    return None       # list form or missing => start-order only, no readiness condition
+
+
+def _service_env(service, key):
+    env = service.get("environment")
+    if isinstance(env, dict):
+        return env.get(key)
+    if isinstance(env, list):
+        for item in env:
+            if isinstance(item, str) and item.split("=", 1)[0] == key:
+                return item.split("=", 1)[1] if "=" in item else None
+    return None
+
+
+def hss_task(seed):
+    def db_healthcheck_ready(decoded):   # target: db health check actually probes readiness
+        text = _healthcheck_text(_service(_hss_compose(decoded), "db"))
+        return {"ok": True, "result": "pg_isready" in text}
+
+    def app_waits_for_healthy(decoded):  # target: app waits for db to be healthy, not just started
+        cond = _depends_condition(_service(_hss_compose(decoded), "app"), "db")
+        return {"ok": True, "result": cond}
+
+    def service_names(decoded):          # regression: the two service names are unchanged
+        return {"ok": True, "result": sorted((_hss_compose(decoded).get("services") or {}))}
+
+    def app_port(decoded):               # regression: the app port mapping is unchanged
+        ports = _service(_hss_compose(decoded), "app").get("ports")
+        return {"ok": True, "result": sorted([h, c] for h, c in _port_map(ports).items())}
+
+    def db_image(decoded):               # regression: the db image is unchanged
+        return {"ok": True, "result": _service(_hss_compose(decoded), "db").get("image")}
+
+    def app_database_url(decoded):       # regression: the app's DATABASE_URL is unchanged
+        return {"ok": True, "result": _service_env(_service(_hss_compose(decoded), "app"), "DATABASE_URL")}
+
+    return TaskInstance(
+        task_id="healthy_service_startup", title="Make the app wait for a healthy database",
+        difficulty="medium",
+        instructions=(
+            "`docker-compose.yml` runs an `app` service that must start only after the `db` service "
+            "is actually ready. Two things are wrong: the `db` health check does not test database "
+            "readiness, and `app`'s `depends_on` controls only start order, not readiness. Fix "
+            "`docker-compose.yml` so (1) the `db` service's health check uses `pg_isready`, and "
+            "(2) `app` depends on `db` with `condition: service_healthy`. Keep everything else "
+            "unchanged: the service names `app` and `db`, the app's `8080:8080` port, the `db` image "
+            "`postgres:16`, and the app's `DATABASE_URL`. Do not change `app.py` or the Dockerfile."),
+        files={"app.py": _HSS_APP, "Dockerfile": _HSS_DOCKERFILE, "docker-compose.yml": _HSS_BROKEN},
+        cases=[
+            Case("target", None, True, check=db_healthcheck_ready),
+            Case("target", None, "service_healthy", check=app_waits_for_healthy),
+            Case("regression", None, ["app", "db"], check=service_names),
+            Case("regression", None, [[8080, 8080]], check=app_port),
+            Case("regression", None, "postgres:16", check=db_image),
+            Case("regression", None, "postgres://db:5432/app", check=app_database_url),
+        ],
+        reference={"docker-compose.yml": _HSS_FIXED},
+    )
+
+
+# Active task registry. Retired starter Python-utility tasks keep their functions above as shared
+# reference code; the benchmark is moving to DevOps config-repair tasks. At least five stay active.
 TASKS = {
     "slugify": slugify_task,
-    "merge_intervals": intervals_task,
     "lru_cache": lru_task,
     "bulk_discount": discount_task,
     "compose_port_alignment": compose_task,
     "ci_workflow_repair": ci_task,
+    "healthy_service_startup": hss_task,
 }
 DEMO_TASK = "slugify"
 
