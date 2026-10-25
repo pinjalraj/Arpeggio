@@ -1,10 +1,10 @@
-# RL Environment Template
+# Arpeggio — A Verifiable RL Environment for DevOps Repair
 
 A small, working example of the run contract for the hackathon. It has five active DevOps config-repair tasks across two difficulty levels — **easy**: `compose_port_alignment` (the demo/default), `ci_workflow_repair`, `env_config_repair`; **medium**: `healthy_service_startup`, `k8s_service_probe` — a verifier, a reference-solution check, a no-op check, and a model loop that talks to any model through an OpenAI-compatible endpoint. Checks run either in an isolated verifier worker (for code) or as trusted file-inspection in the harness (for config files).
 
-**Your environment must follow the same contract.** Judges will clone your repo's `main` branch, add a model and key, run **one command**, and watch what happens. Use this repo as a starting point for the layout, the harness and the logging.
+**How judges run it.** Judges can clone the `main` branch, configure `MODEL`, `API_KEY`, `BASE_URL`, and `TASK_ID` in `.env`, and run the documented Docker Compose command. `MODE=all` runs all five active tasks; `MODE=baselines` runs the baseline checks without calling a model.
 
-> This is a minimal starting point that shows the contract. It is not a hardened environment: strengthening your own isolation, verifier and error handling is part of the challenge.
+> **Scope and limitations:** The active tasks validate configuration; they do not launch live Kubernetes clusters, run hosted CI workflows, or prove runtime service health. The environment includes security and execution controls, but these do not guarantee protection against every attack. See the security report and tests for details.
 
 
 
